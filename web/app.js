@@ -63,6 +63,14 @@
     groupByPackage: false,
     edgeLabels: true,
     showIsolated: false,
+    swimlanes: false,    // arrange nodes into horizontal bands by architectural layer
+    swimBands: null,     // [{layer, yTop, yBottom}] for the band-label overlay
+    collapsedPackages: new Set(), // packages folded into a single supernode (flat view only)
+    layoutCache: {},   // (view|group|iso|focus) -> {nodeId:{x,y}} so view switches don't re-layout
+    focusSubgraph: null, // { id, hops } — restrict the graph to a node's k-hop neighborhood
+    detailStack: [],     // node ids visited via drill-in, for the detail panel's Back button
+    insFilter: "",       // text filter for the Insights panel
+    insLimits: {},       // catKey -> how many items are currently shown (pagination)
     selectedId: null,
     canSource: false,  // server can serve file source (set from /capabilities)
     canPreview: false, // server can generate UI mockups
@@ -99,6 +107,8 @@
     if (state.groupByPackage) parts.push("groups=1");
     if (!state.edgeLabels) parts.push("labels=0");
     if (state.showIsolated) parts.push("iso=1");
+    if (state.swimlanes) parts.push("swim=1");
+    if (state.collapsedPackages.size) parts.push("collapse=" + setToArray(state.collapsedPackages).map(encodeURIComponent).join(","));
     var hash = parts.length ? "#" + parts.join("&") : "";
     try {
       // replaceState (not pushState) so filter clicks don't spam Back history.
@@ -138,6 +148,10 @@
     if (params.groups === "1") state.groupByPackage = true;
     if (params.labels === "0") state.edgeLabels = false;
     if (params.iso === "1") state.showIsolated = true;
+    if (params.swim === "1") state.swimlanes = true;
+    if (params.collapse) {
+      params.collapse.split(",").forEach(function (p) { if (p) state.collapsedPackages.add(decodeURIComponent(p)); });
+    }
   }
 
   // ---- Data load with fallback ------------------------------------------
@@ -183,18 +197,44 @@
       visibleNodeIds.add(n.id);
     });
 
-    // 2. edges of the right type whose endpoints are visible
+    // 1b. focus subgraph — keep only the focused node + its k-hop neighborhood
+    if (state.focusSubgraph) {
+      var keepSet = kHopSet(state.focusSubgraph.id, state.focusSubgraph.hops);
+      var pruned = new Set();
+      visibleNodeIds.forEach(function (id) { if (keepSet[id]) pruned.add(id); });
+      visibleNodeIds = pruned;
+    }
+
+    // 1c. collapse-to-package: members of a collapsed package fold into one
+    //     supernode; their edges reroute to it. Flat view only — grouping
+    //     already provides compound parents. When the set is empty everything
+    //     below behaves exactly as before (superIdFor is the identity).
+    var collapsed = (!state.groupByPackage && state.collapsedPackages.size) ? state.collapsedPackages : null;
+    function superIdFor(id) {
+      if (!collapsed) return id;
+      var nn = nodeById[id];
+      return (nn && nn.package && collapsed.has(nn.package)) ? "super::" + nn.package : id;
+    }
+
+    // 2. edges of the right type whose endpoints are visible (remapped through
+    //    any collapse — intra-package edges become self-loops and drop out,
+    //    parallel edges merge with a weight).
     var elEdges = [];
-    var seenPair = {};
+    var edgeByKey = {};
     edges.forEach(function (e) {
       if (view.edges.indexOf(e.type) === -1) return;
       if (!visibleNodeIds.has(e.source) || !visibleNodeIds.has(e.target)) return;
-      elEdges.push({
-        data: {
-          id: e.id, source: e.source, target: e.target,
-          etype: e.type, label: e.label || ""
-        }
-      });
+      if (!collapsed) {
+        elEdges.push({ data: { id: e.id, source: e.source, target: e.target, etype: e.type, label: e.label || "" } });
+        return;
+      }
+      var s = superIdFor(e.source), t = superIdFor(e.target);
+      if (s === t) return;
+      var key = s + "|" + t + "|" + e.type;
+      if (edgeByKey[key]) { edgeByKey[key].data.weight++; return; }
+      var rec = { data: { id: "e::" + key, source: s, target: t, etype: e.type, label: e.label || "", weight: 1 } };
+      edgeByKey[key] = rec;
+      elEdges.push(rec);
     });
 
     // 3. only keep nodes that participate (avoid orphan clutter) — but keep
@@ -204,9 +244,19 @@
 
     var elNodes = [];
     var parents = {}; // package -> compound node
+    var supers = {};  // superId -> tally for collapsed packages
     var hiddenIsolated = 0;
     visibleNodeIds.forEach(function (id) {
       var n = nodeById[id];
+      var sid = superIdFor(id);
+      if (collapsed && sid !== id) {
+        // folded away — tally into its supernode instead of drawing the node
+        var sup = supers[sid] || (supers[sid] = { label: n.package, count: 0, layerCount: {} });
+        sup.count++;
+        var ly = n.layer || "other";
+        sup.layerCount[ly] = (sup.layerCount[ly] || 0) + 1;
+        return;
+      }
       // Only show nodes that participate in an edge of this view. Isolated
       // nodes (e.g. a page never navigated to/from) are clutter and make the
       // layout unreadable, so we drop them and report the count instead.
@@ -236,13 +286,28 @@
       });
     });
 
+    // Emit one supernode per collapsed package (always kept — it's intentional).
+    Object.keys(supers).forEach(function (sid) {
+      var sup = supers[sid], domLayer = "other", best = -1;
+      Object.keys(sup.layerCount).forEach(function (l) { if (sup.layerCount[l] > best) { best = sup.layerCount[l]; domLayer = l; } });
+      elNodes.push({ data: { id: sid, label: sup.label, kind: "super", isSuper: true, layer: domLayer, pkg: sup.label, feature: "", route: "", parent: null, count: sup.count } });
+    });
+
     state.hiddenIsolated = hiddenIsolated;
     var elParents = Object.keys(parents).map(function (k) { return parents[k]; });
     return elParents.concat(elNodes).concat(elEdges);
   }
 
+  // Stable hue (0-359) from a string — used to tint each package parent.
+  function hueFromString(s) {
+    var h = 0;
+    for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
+    return h;
+  }
+
   // ---- Cytoscape stylesheet ---------------------------------------------
   function buildStyle() {
+    var isLightTheme = document.documentElement.getAttribute("data-theme") === "light";
     var layerColor = {};
     Object.keys(LAYER_VAR).forEach(function (k) { layerColor[k] = cssVar(LAYER_VAR[k]); });
     var edgeColor = {};
@@ -314,24 +379,58 @@
           "underlay-shape": "round-rectangle"
         }
       },
-      // compound package parent
+      // compound package parent — per-package tint (hash→hue, low chroma), a
+      // solid hairline border, and a label docked top-left as a chip.
       {
         selector: "node[?isParent]",
         style: {
           "label": "data(label)",
           "shape": "round-rectangle",
-          "background-color": cssVar("--surface-2"),
-          "background-opacity": 0.55,
-          "border-width": 1.5,
-          "border-color": line,
-          "border-style": "dashed",
+          "background-color": function (ele) {
+            var h = hueFromString(ele.data("label") || "");
+            return isLightTheme ? "hsl(" + h + ",42%,95%)" : "hsl(" + h + ",24%,15%)";
+          },
+          "background-opacity": isLightTheme ? 0.65 : 0.5,
+          "border-width": 1,
+          "border-color": function (ele) {
+            var h = hueFromString(ele.data("label") || "");
+            return isLightTheme ? "hsl(" + h + ",38%,72%)" : "hsl(" + h + ",30%,40%)";
+          },
+          "border-style": "solid",
           "text-valign": "top",
-          "text-halign": "center",
-          "text-margin-y": -4,
-          "font-size": "11px",
+          "text-halign": "left",
+          "text-margin-x": 10,
+          "text-margin-y": 9,
+          "font-size": "10.5px",
           "font-weight": "bold",
-          "color": faint,
-          "padding": 18
+          "color": cssVar("--ink-soft"),
+          "text-background-color": cssVar("--surface"),
+          "text-background-opacity": 0.92,
+          "text-background-padding": "3px",
+          "text-background-shape": "roundrectangle",
+          "padding": 22
+        }
+      },
+      // collapsed package supernode — a tinted rounded box sized by member count
+      {
+        selector: "node[?isSuper]",
+        style: {
+          "shape": "round-rectangle",
+          "background-color": function (ele) { var h = hueFromString(ele.data("pkg") || ""); return isLightTheme ? "hsl(" + h + ",44%,90%)" : "hsl(" + h + ",26%,22%)"; },
+          "background-opacity": 1,
+          "border-width": 1.5,
+          "border-color": function (ele) { var h = hueFromString(ele.data("pkg") || ""); return isLightTheme ? "hsl(" + h + ",42%,60%)" : "hsl(" + h + ",36%,48%)"; },
+          "label": function (ele) { return ele.data("label") + "  ▸ " + ele.data("count"); },
+          "color": cssVar("--ink"),
+          "font-size": "12px",
+          "font-weight": "bold",
+          "text-valign": "center",
+          "text-halign": "center",
+          "text-max-width": "120px",
+          "width": function (ele) { return Math.min(140, 46 + Math.sqrt(ele.data("count") || 1) * 9); },
+          "height": function (ele) { return Math.min(80, 30 + Math.sqrt(ele.data("count") || 1) * 5); },
+          "padding": 6,
+          "z-index": 8
         }
       },
       // edges
@@ -373,6 +472,7 @@
       },
       // highlight states
       { selector: "node.lod-hide", style: { "text-opacity": 0 } },
+      { selector: "edge.edge-straight", style: { "curve-style": "straight" } },
       { selector: ".faded", style: { "opacity": 0.07, "text-opacity": 0, "underlay-opacity": 0 } },
       {
         selector: "node.highlight",
@@ -423,9 +523,58 @@
     };
   }
 
-  function runLayout() {
+  // Per-(view+group+isolated) layout signature, so switching views restores
+  // cached node positions instead of paying a full fcose pass every time.
+  function layoutKey() {
+    return state.view + "|" + (state.groupByPackage ? "g" : "") + "|" + (state.showIsolated ? "i" : "") +
+      "|" + (state.focusSubgraph ? "f:" + state.focusSubgraph.id : "") +
+      "|" + (state.collapsedPackages.size ? "c:" + setToArray(state.collapsedPackages).sort().join(",") : "");
+  }
+
+  // BFS the k-hop neighborhood of a node over the CURRENT view's edge types
+  // (undirected), computed from the full graph data — not the filtered cy
+  // instance — so focus works even on nodes the current filter would hide.
+  function kHopSet(rootId, hops) {
+    var view = VIEWS[state.view];
+    var adj = {};
+    state.data.edges.forEach(function (e) {
+      if (view.edges.indexOf(e.type) === -1) return;
+      (adj[e.source] = adj[e.source] || []).push(e.target);
+      (adj[e.target] = adj[e.target] || []).push(e.source);
+    });
+    var seen = {}; seen[rootId] = true;
+    var frontier = [rootId];
+    for (var h = 0; h < hops; h++) {
+      var next = [];
+      frontier.forEach(function (id) {
+        (adj[id] || []).forEach(function (nb) { if (!seen[nb]) { seen[nb] = true; next.push(nb); } });
+      });
+      frontier = next;
+    }
+    return seen;
+  }
+  function saveLayoutPositions() {
+    var cy = state.cy;
+    if (!cy) return;
+    var pos = {};
+    cy.nodes('[!isParent]').forEach(function (n) { var p = n.position(); pos[n.id()] = { x: p.x, y: p.y }; });
+    state.layoutCache[layoutKey()] = pos;
+  }
+  function prefersReducedMotion() {
+    return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  }
+  // animate=true tweens nodes from their current spots to the freshly-computed
+  // layout (smooth, no teleport) for user-initiated reflows — Layout button,
+  // group-by toggle — unless the OS asks for reduced motion. Positions are saved
+  // on layoutstop so the cache captures the FINAL (post-animation) coordinates.
+  function runLayout(animate) {
     if (!state.cy) return;
-    var l = state.cy.layout(layoutOptions());
+    var opts = layoutOptions();
+    if (animate && !prefersReducedMotion()) {
+      opts = Object.assign({}, opts, { animate: true, animationDuration: 650, animationEasing: "ease-in-out", randomize: false });
+    }
+    var l = state.cy.layout(opts);
+    l.one("layoutstop", function () { saveLayoutPositions(); mmRedraw(); });
     l.run();
   }
 
@@ -443,6 +592,20 @@
       else e.removeClass("show-label");
     });
     applyNodeLOD();
+    applyEdgeCurves();
+  }
+
+  // At low zoom on a dense graph, swap bezier edges for straight lines — beziers
+  // overplot into unreadable bands when hundreds of edges overlap. Highlighted
+  // edges keep their curve so a traced path still reads as distinct.
+  function applyEdgeCurves() {
+    var cy = state.cy;
+    if (!cy) return;
+    var simplify = cy.zoom() < 0.5 && cy.edges().length > 200;
+    cy.edges().forEach(function (e) {
+      if (simplify && !e.hasClass("highlight")) e.addClass("edge-straight");
+      else e.removeClass("edge-straight");
+    });
   }
 
   // Level-of-detail: when zoomed out on a big graph, hide labels except on hub
@@ -456,6 +619,179 @@
       if (thin && (n.data("degree") || 0) < 6 && !n.hasClass("focus") && !n.hasClass("highlight")) n.addClass("lod-hide");
       else n.removeClass("lod-hide");
     });
+  }
+
+  // ---- Minimap -----------------------------------------------------------
+  // A corner overview: layer-colored dots for every node + a viewport rectangle
+  // synced to cy's pan/zoom. Dots are recomputed only when positions change
+  // (mmRedraw); the cheap rectangle repaints on every pan/zoom (mmUpdateView).
+  var MM = { w: 184, h: 132, pad: 8, bb: null, scale: 1, ox: 0, oy: 0, drag: false, MIN: 28 };
+
+  function mmRedraw() {
+    var cy = state.cy;
+    var wrap = document.getElementById("minimap");
+    var canvas = document.getElementById("minimap-canvas");
+    if (!cy || !wrap || !canvas) return;
+    var nodes = cy.nodes('[!isParent]');
+    if (nodes.length < MM.MIN) { wrap.hidden = true; return; }
+    wrap.hidden = false;
+
+    var bb = nodes.boundingBox();
+    MM.bb = bb;
+    var dpr = window.devicePixelRatio || 1;
+    if (canvas.width !== MM.w * dpr) { canvas.width = MM.w * dpr; canvas.height = MM.h * dpr; canvas.style.width = MM.w + "px"; canvas.style.height = MM.h + "px"; }
+    var ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, MM.w, MM.h);
+
+    var availW = MM.w - MM.pad * 2, availH = MM.h - MM.pad * 2;
+    var s = Math.min(availW / (bb.w || 1), availH / (bb.h || 1));
+    MM.scale = s;
+    MM.ox = MM.pad + (availW - bb.w * s) / 2;
+    MM.oy = MM.pad + (availH - bb.h * s) / 2;
+
+    var lc = {};
+    Object.keys(LAYER_VAR).forEach(function (k) { lc[k] = cssVar(LAYER_VAR[k]); });
+    nodes.forEach(function (n) {
+      var p = n.position();
+      var x = MM.ox + (p.x - bb.x1) * s;
+      var y = MM.oy + (p.y - bb.y1) * s;
+      ctx.fillStyle = lc[n.data("layer")] || lc.other || "#888";
+      ctx.beginPath(); ctx.arc(x, y, 1.5, 0, 6.2832); ctx.fill();
+    });
+    mmUpdateView();
+  }
+
+  function mmUpdateView() {
+    var cy = state.cy;
+    var view = document.getElementById("minimap-view");
+    if (!cy || !view || !MM.bb) return;
+    var ext = cy.extent();
+    var s = MM.scale;
+    var left = MM.ox + (ext.x1 - MM.bb.x1) * s;
+    var top = MM.oy + (ext.y1 - MM.bb.y1) * s;
+    // clamp the rectangle to the minimap box so it never spills out at high zoom
+    var l = Math.max(0, Math.min(left, MM.w));
+    var t = Math.max(0, Math.min(top, MM.h));
+    var w = Math.min(ext.w * s, MM.w - l);
+    var h = Math.min(ext.h * s, MM.h - t);
+    view.style.left = l + "px"; view.style.top = t + "px";
+    view.style.width = Math.max(6, w) + "px"; view.style.height = Math.max(6, h) + "px";
+  }
+
+  function mmPanTo(clientX, clientY) {
+    var cy = state.cy;
+    var canvas = document.getElementById("minimap-canvas");
+    if (!cy || !MM.bb) return;
+    var r = canvas.getBoundingClientRect();
+    var modelX = MM.bb.x1 + ((clientX - r.left) - MM.ox) / MM.scale;
+    var modelY = MM.bb.y1 + ((clientY - r.top) - MM.oy) / MM.scale;
+    var z = cy.zoom();
+    cy.pan({ x: cy.width() / 2 - modelX * z, y: cy.height() / 2 - modelY * z });
+  }
+
+  function setupMinimap() {
+    var wrap = document.getElementById("minimap");
+    if (!wrap || !state.cy) return;
+    wrap.addEventListener("mousedown", function (e) { MM.drag = true; mmPanTo(e.clientX, e.clientY); e.preventDefault(); });
+    window.addEventListener("mousemove", function (e) { if (MM.drag) mmPanTo(e.clientX, e.clientY); });
+    window.addEventListener("mouseup", function () { MM.drag = false; });
+    // mmUpdateView is just a few style writes — cheap enough to run on every
+    // pan/zoom directly (rAF throttling silently stalls in a backgrounded tab).
+    state.cy.on("pan zoom", function () { mmUpdateView(); positionSwimLabels(); });
+  }
+
+  // ---- Layer swimlanes ---------------------------------------------------
+  // Arrange nodes into horizontal bands by architectural layer (presentation on
+  // top → other at the bottom), so any edge pointing UP is a visible back-flow
+  // (e.g. a domain file importing presentation). Deterministic positioner: keep
+  // each node's X (preserves the fcose horizontal clustering) and pack each
+  // layer's nodes into rows within its band.
+  var LAYER_ORDER = ["presentation", "domain", "data", "other"];
+
+  function applySwimlanes() {
+    var cy = state.cy;
+    if (!cy) return;
+    var nodes = cy.nodes('[!isParent]');
+    if (!nodes.length) { renderSwimLabels(); return; }
+
+    var xs = nodes.map(function (n) { return n.position("x"); });
+    var minX = Math.min.apply(null, xs), maxX = Math.max.apply(null, xs);
+    var spanX = maxX - minX;
+    if (!isFinite(spanX) || spanX < 50) { minX = 0; spanX = Math.max(nodes.length * 14, 600); }
+
+    var byLayer = {};
+    LAYER_ORDER.forEach(function (l) { byLayer[l] = []; });
+    nodes.forEach(function (n) {
+      var l = LAYER_ORDER.indexOf(n.data("layer")) >= 0 ? n.data("layer") : "other";
+      byLayer[l].push(n);
+    });
+
+    var rowGap = 46, bandGap = 96, y = 0, bands = [];
+    cy.startBatch();
+    LAYER_ORDER.forEach(function (l) {
+      var band = byLayer[l];
+      if (!band.length) return;
+      band.sort(function (a, b) { return a.position("x") - b.position("x"); });
+      var perRow = Math.max(1, Math.round(Math.sqrt(band.length) * 1.8));
+      var rows = Math.ceil(band.length / perRow);
+      band.forEach(function (n, i) {
+        var col = i % perRow, row = Math.floor(i / perRow);
+        var fx = perRow > 1 ? col / (perRow - 1) : 0.5;
+        n.position({ x: minX + fx * spanX, y: y + row * rowGap });
+      });
+      var bandH = Math.max(rows - 1, 0) * rowGap;
+      bands.push({ layer: l, yTop: y, yBottom: y + bandH, yMid: y + bandH / 2 });
+      y += bandH + bandGap;
+    });
+    cy.endBatch();
+    state.swimBands = bands;
+    cy.fit(null, 70);
+    renderSwimLabels();
+  }
+
+  function renderSwimLabels() {
+    var host = document.getElementById("swimlane-labels");
+    if (!host) return;
+    if (!state.swimlanes || !state.swimBands || !state.swimBands.length) { host.hidden = true; host.innerHTML = ""; return; }
+    host.hidden = false;
+    host.innerHTML = state.swimBands.map(function (b) {
+      return '<div class="swim-label" data-y="' + b.yMid + '">' +
+        '<span class="swim-dot" data-layer="' + esc(b.layer) + '"></span>' + esc(b.layer) + '</div>';
+    }).join("");
+    positionSwimLabels();
+  }
+
+  function positionSwimLabels() {
+    var host = document.getElementById("swimlane-labels");
+    var cy = state.cy;
+    if (!host || host.hidden || !cy) return;
+    var pan = cy.pan(), z = cy.zoom();
+    Array.prototype.forEach.call(host.querySelectorAll(".swim-label"), function (el) {
+      var my = parseFloat(el.getAttribute("data-y"));
+      el.style.top = (my * z + pan.y) + "px";
+    });
+  }
+
+  // ---- Help / onboarding -------------------------------------------------
+  function setupHelp() {
+    var modal = document.getElementById("help-modal");
+    var btn = document.getElementById("help-toggle");
+    if (!modal || !btn) return;
+    function open() { modal.hidden = false; }
+    function hide() { modal.hidden = true; }
+    btn.addEventListener("click", open);
+    var close = document.getElementById("help-close");
+    if (close) close.addEventListener("click", hide);
+    modal.addEventListener("click", function (e) { if (e.target === modal) hide(); });
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape" && !modal.hidden) hide(); });
+    // First run: show the guide once (same persisted-flag pattern as the theme).
+    var seen = null;
+    try { seen = localStorage.getItem("pm-help-seen"); } catch (e) {}
+    if (!seen) {
+      open();
+      try { localStorage.setItem("pm-help-seen", "1"); } catch (e) {}
+    }
   }
 
   // ---- Render the graph for current state -------------------------------
@@ -499,7 +835,7 @@
     });
   }
 
-  function render(relayout) {
+  function render(relayout, animateLayout) {
     var els = buildElements();
     var cy = state.cy;
     cy.startBatch();
@@ -509,6 +845,7 @@
     sizeNodesByDegree();
 
     renderEmptyState();
+    renderActiveFilters();
 
     // Append a "(N isolated hidden)" note to the view description.
     var descEl = document.getElementById("view-desc");
@@ -517,7 +854,41 @@
       ? base + " · " + state.hiddenIsolated + " isolated hidden"
       : base;
 
-    if (relayout !== false) runLayout();
+    if (relayout !== false) {
+      if (state.swimlanes) {
+        // Need a base layout for X clustering, then band by layer. Use the cached
+        // normal layout if present (sync); otherwise a one-off sync fcose. The
+        // banded positions are NOT cached, so toggling swimlanes off restores
+        // the normal layout untouched.
+        var baseCached = state.layoutCache[layoutKey()];
+        if (baseCached) {
+          cy.nodes('[!isParent]').forEach(function (n) { var p = baseCached[n.id()]; if (p) n.position(p); });
+        } else {
+          var bl = cy.layout(Object.assign({}, layoutOptions(), { fit: false, animate: false }));
+          bl.run();
+          saveLayoutPositions();
+        }
+        applySwimlanes();
+      } else {
+        var cached = state.layoutCache[layoutKey()];
+        if (cached) {
+          // Restore the prior layout for this view; only place genuinely-new nodes.
+          var missing = [];
+          cy.nodes('[!isParent]').forEach(function (n) {
+            var p = cached[n.id()];
+            if (p) n.position(p); else missing.push(n);
+          });
+          if (missing.length) {
+            var inc = cy.layout(Object.assign({}, layoutOptions(), { fit: false, randomize: false, animate: false }));
+            inc.run();
+          }
+          cy.fit(null, 50);
+          saveLayoutPositions();
+        } else {
+          runLayout(animateLayout);
+        }
+      }
+    }
     applyEdgeLabels();
 
     // restore selection highlight if still present
@@ -526,6 +897,8 @@
     } else {
       clearHighlight();
     }
+    mmRedraw();
+    if (!state.swimlanes) renderSwimLabels(); // hide stale band labels when off
   }
 
   // Re-render after a filter change WITHOUT a fresh global layout. A full
@@ -550,6 +923,7 @@
     sizeNodesByDegree();
 
     renderEmptyState();
+    renderActiveFilters();
     var descEl = document.getElementById("view-desc");
     var base = VIEWS[state.view].desc;
     descEl.textContent = state.hiddenIsolated ? base + " · " + state.hiddenIsolated + " isolated hidden" : base;
@@ -577,6 +951,7 @@
     applyEdgeLabels();
     if (state.selectedId && cy.getElementById(state.selectedId).nonempty()) highlightNode(state.selectedId, false);
     else clearHighlight();
+    mmRedraw();
   }
 
   // ---- Live updates (SSE, watch mode) -----------------------------------
@@ -657,9 +1032,41 @@
       var el = document.getElementById(t[0]);
       if (el) el.addEventListener("click", function () { showCodeTab(t[1]); });
     });
+
+    // Copy path / source to the clipboard, with toast feedback.
+    function copyToClipboard(text, label) {
+      if (!text) { toast("Nothing to copy"); return; }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(
+          function () { toast(label + " copied"); },
+          function () { toast("Copy blocked by the browser"); }
+        );
+      } else {
+        toast("Clipboard unavailable");
+      }
+    }
+    var copyPath = document.getElementById("copy-path");
+    if (copyPath) copyPath.addEventListener("click", function () { copyToClipboard(state.codePath, "Path"); });
+    var copySource = document.getElementById("copy-source");
+    if (copySource) copySource.addEventListener("click", function () { copyToClipboard(state.codeSource, "Source"); });
+
+    // Arrow-key navigation across the (visible) Source / Preview / Live tabs.
+    var tabsWrap = document.getElementById("code-tabs");
+    if (tabsWrap) tabsWrap.addEventListener("keydown", function (e) {
+      if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+      var tabs = Array.prototype.filter.call(tabsWrap.querySelectorAll(".code-tab"), function (t) { return !t.hidden; });
+      var idx = tabs.indexOf(document.activeElement);
+      if (idx === -1) return;
+      e.preventDefault();
+      var next = e.key === "ArrowRight" ? (idx + 1) % tabs.length : (idx - 1 + tabs.length) % tabs.length;
+      tabs[next].focus();
+      tabs[next].click(); // reuse the existing tab handler → showCodeTab
+    });
   }
 
   function closeCode() {
+    cancelPreview();
+    if (state.liveTimer) { clearTimeout(state.liveTimer); state.liveTimer = null; }
     var modal = document.getElementById("code-modal");
     if (modal) modal.hidden = true;
   }
@@ -685,6 +1092,7 @@
   }
 
   function showCodeTab(tab) {
+    if (tab !== "preview") cancelPreview(); // don't keep generating for a hidden tab
     document.getElementById("tab-source").classList.toggle("active", tab === "source");
     document.getElementById("tab-preview").classList.toggle("active", tab === "preview");
     var tabLive = document.getElementById("tab-live");
@@ -735,8 +1143,30 @@
     host.innerHTML = '<div class="preview-note">' + note + '</div>';
     var stage = document.createElement("div");
     stage.className = "preview-stage";
+    var overlay = document.createElement("div");
+    overlay.className = "live-loading";
+    overlay.innerHTML = '<div class="spinner"></div><div class="code-status-sub">loading the real app…</div>';
     stage.appendChild(frame);
+    stage.appendChild(overlay);
     host.appendChild(stage);
+
+    var done = false;
+    frame.addEventListener("load", function () {
+      done = true;
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      requestAnimationFrame(fitDeviceFrame);
+    });
+    // If the iframe is slow (waking server / behind a login), offer a Retry
+    // without tearing down the frame in case it's just about to paint.
+    if (state.liveTimer) clearTimeout(state.liveTimer);
+    state.liveTimer = setTimeout(function () {
+      if (done || !overlay.parentNode) return;
+      overlay.innerHTML =
+        '<div class="code-status-sub">Still loading — the app may be waking up or behind a login.</div>' +
+        '<button class="gen-btn" id="live-retry">Retry</button>';
+      var r = document.getElementById("live-retry");
+      if (r) r.addEventListener("click", function () { host.removeAttribute("data-key"); loadLive(relPath); });
+    }, 12000);
   }
 
   function openCode(relPath) {
@@ -761,6 +1191,7 @@
       if (!r.ok) throw new Error("source " + r.status);
       return r.text();
     }).then(function (text) {
+      state.codeSource = text; // kept so "Copy source" works without re-fetching
       var lines = text.split("\n");
       var rows = "";
       for (var i = 0; i < lines.length; i++) {
@@ -770,21 +1201,60 @@
       body.innerHTML = '<div class="code-lines">' + rows + '</div>';
       body.scrollTop = 0;
     }).catch(function () {
+      state.codeSource = "";
       body.innerHTML = '<div class="code-status">Source unavailable.</div>';
     });
   }
 
   // Render the AI-generated UI mockup for the current file inside a phone frame.
   // Generation can take ~10-30s, so we show a loading state and cache per path.
+  function cancelPreview() {
+    if (state.previewAbort) { try { state.previewAbort.abort(); } catch (e) {} state.previewAbort = null; }
+    if (state.previewTimer) { clearInterval(state.previewTimer); state.previewTimer = null; }
+  }
+
   function loadPreview(relPath) {
     var host = document.getElementById("code-preview");
     if (!host || !relPath) return;
     if (host.getAttribute("data-path") === relPath && host.querySelector("iframe")) return; // already loaded
-    host.innerHTML = '<div class="code-status">Generating UI mockup with Claude…<br><span class="code-status-sub">reading the widget tree — this can take a moment</span></div>';
-    fetch("/preview?path=" + encodeURIComponent(relPath)).then(function (r) {
+
+    cancelPreview(); // drop any in-flight generation before starting a new one
+    var controller = (typeof AbortController !== "undefined") ? new AbortController() : null;
+    state.previewAbort = controller;
+
+    var t0 = Date.now();
+    host.innerHTML =
+      '<div class="code-status gen">' +
+        '<div class="gen-bar"><span></span></div>' +
+        '<div class="gen-msg">Generating UI mockup with Claude…</div>' +
+        '<div class="code-status-sub">reading the widget tree · <span id="gen-elapsed">0s</span></div>' +
+        '<button class="gen-btn" id="gen-cancel">Cancel</button>' +
+      '</div>';
+    state.previewTimer = setInterval(function () {
+      var el = document.getElementById("gen-elapsed");
+      if (el) el.textContent = Math.round((Date.now() - t0) / 1000) + "s";
+    }, 500);
+    var cancelBtn = document.getElementById("gen-cancel");
+    if (cancelBtn) cancelBtn.addEventListener("click", cancelPreview);
+
+    function showError(msg, cancelled) {
+      if (state.previewTimer) { clearInterval(state.previewTimer); state.previewTimer = null; }
+      host.removeAttribute("data-path");
+      host.innerHTML =
+        '<div class="code-status">' + (cancelled ? "Preview cancelled." : "Couldn’t generate preview.") +
+          (msg ? '<br><span class="code-status-sub">' + esc(msg) + '</span>' : "") +
+          '<br><button class="gen-btn" id="gen-retry">Retry</button>' +
+        '</div>';
+      var r = document.getElementById("gen-retry");
+      if (r) r.addEventListener("click", function () { loadPreview(relPath); });
+    }
+
+    fetch("/preview?path=" + encodeURIComponent(relPath), controller ? { signal: controller.signal } : {}).then(function (r) {
       if (!r.ok) return r.text().then(function (t) { throw new Error(t || ("preview " + r.status)); });
       return r.text();
     }).then(function (html) {
+      if (state.previewTimer) { clearInterval(state.previewTimer); state.previewTimer = null; }
+      state.previewAbort = null;
       host.setAttribute("data-path", relPath);
       var frame = document.createElement("iframe");
       frame.className = "preview-frame";
@@ -796,9 +1266,10 @@
       stage.className = "preview-stage";
       stage.appendChild(frame);
       host.appendChild(stage);
+      requestAnimationFrame(fitDeviceFrame); setTimeout(fitDeviceFrame, 320);
     }).catch(function (err) {
-      host.removeAttribute("data-path");
-      host.innerHTML = '<div class="code-status">Couldn’t generate preview.<br><span class="code-status-sub">' + esc((err && err.message) || "") + '</span></div>';
+      if (err && err.name === "AbortError") { showError("", true); return; }
+      showError((err && err.message) || "", false);
     });
   }
 
@@ -844,6 +1315,7 @@
   function liveReload() {
     loadData().then(function (newData) {
       var cy = state.cy;
+      state.layoutCache = {};   // graph changed → stale cached positions
       // snapshot positions + camera
       var savedPos = {};
       cy.nodes().forEach(function (n) { var p = n.position(); savedPos[n.id()] = { x: p.x, y: p.y }; });
@@ -892,6 +1364,7 @@
       applyEdgeLabels();
       if (state.selectedId && cy.getElementById(state.selectedId).nonempty()) highlightNode(state.selectedId, false);
       else clearHighlight();
+      mmRedraw();
 
       var n = (newData.stats && newData.stats.nodes) || newData.nodes.length;
       toast("Graph updated · " + n + " nodes");
@@ -912,7 +1385,11 @@
     node.connectedEdges().removeClass("faded").addClass("highlight");
 
     applyEdgeLabels();
-    if (openPanel !== false) showDetail(id);
+    if (openPanel !== false) {
+      showDetail(id);
+      var rec = nodeRecord(id);
+      if (rec) announce("Selected " + rec.label + ", " + rec.kind + ", " + (node.degree(false)) + " connections");
+    }
   }
 
   function clearHighlight() {
@@ -923,17 +1400,21 @@
 
   function resetSelection() {
     state.selectedId = null;
-    var hadFocus = !!state.focusInsight;
+    state.detailStack = [];
+    var hadFocus = !!state.focusInsight || !!state.focusSubgraph;
     state.focusInsight = null;
+    state.focusSubgraph = null;
     clearInsightActive();
     clearHighlight();
     closeDetail();
-    // Pinned isolated nodes (dead page / orphan) must drop back out of view.
+    // Pinned isolated nodes (dead page / orphan) and focus subgraphs must drop back out of view.
     if (hadFocus) render(true);
   }
 
   // ---- Insights (architecture lint) -------------------------------------
   var SEV_LABEL = { high: "high", medium: "med", low: "low" };
+
+  var INS_PAGE = 200; // how many items a category shows per "Show more" step
 
   function renderInsights() {
     var block = document.getElementById("insights-block");
@@ -944,33 +1425,86 @@
     block.hidden = false;
     document.getElementById("ins-total").textContent = ins.summary.total;
 
+    // The filter input lives in the persistent block head (not re-rendered), so
+    // bind its handler once and keep focus across category re-renders.
+    var filterInput = document.getElementById("ins-filter");
+    if (filterInput) {
+      filterInput.hidden = false;
+      if (!filterInput.dataset.bound) {
+        filterInput.dataset.bound = "1";
+        filterInput.addEventListener("input", function () {
+          state.insFilter = filterInput.value.trim().toLowerCase();
+          renderInsightCategories();
+        });
+      }
+    }
+    renderInsightCategories();
+  }
+
+  // Builds only the category list — called on first render, on filter keystroke,
+  // and on "Show more". Preserves which categories are open across rebuilds.
+  function renderInsightCategories() {
+    var panel = document.getElementById("insights-panel");
+    var ins = state.data && state.data.insights;
+    if (!panel || !ins) return;
+    var q = state.insFilter;
+
+    var openKeys = {};
+    Array.prototype.forEach.call(panel.querySelectorAll("details.ins-cat[open]"), function (d) {
+      openKeys[d.getAttribute("data-key")] = true;
+    });
+
+    function matchItem(it) {
+      return (it.title && it.title.toLowerCase().indexOf(q) !== -1) ||
+             (it.detail && it.detail.toLowerCase().indexOf(q) !== -1);
+    }
+
     var html = ins.categories.map(function (cat) {
       if (!cat.items.length) return "";
+      var matches = q ? cat.items.filter(matchItem) : cat.items;
+      if (!matches.length) return "";
       var sev = cat.items[0].severity; // categories are single-severity in practice
-      var items = cat.items.slice(0, 200).map(function (it) {
+      var limit = state.insLimits[cat.key] || INS_PAGE;
+      var shown = matches.slice(0, limit);
+      var items = shown.map(function (it) {
         return '' +
           '<li><button class="ins-item" data-key="' + esc(cat.key) + '" data-id="' + esc(it.id) + '" title="' + esc(it.detail) + '">' +
             '<span class="ins-dot sev-' + esc(it.severity) + '"></span>' +
             '<span class="ins-item-title">' + esc(it.title) + '</span>' +
           '</button></li>';
       }).join("");
-      var more = cat.items.length > 200 ? '<li class="ins-more">+' + (cat.items.length - 200) + ' more</li>' : "";
+      var remaining = matches.length - shown.length;
+      var more = remaining > 0
+        ? '<li class="ins-more"><button class="ins-more-btn" data-key="' + esc(cat.key) + '">' +
+            'Show ' + Math.min(INS_PAGE, remaining) + ' more · ' + remaining + ' hidden</button></li>'
+        : "";
+      var isOpen = q ? true : !!openKeys[cat.key]; // auto-open matching cats while filtering
+      var countLabel = q ? matches.length + " / " + cat.items.length : String(cat.items.length);
       return '' +
-        '<details class="ins-cat" data-key="' + esc(cat.key) + '">' +
+        '<details class="ins-cat"' + (isOpen ? " open" : "") + ' data-key="' + esc(cat.key) + '">' +
           '<summary>' +
             '<span class="ins-dot sev-' + esc(sev) + '"></span>' +
             '<span class="ins-cat-label">' + esc(cat.label) + '</span>' +
-            '<span class="ins-count">' + cat.items.length + '</span>' +
+            '<span class="ins-count">' + countLabel + '</span>' +
           '</summary>' +
           '<p class="ins-desc">' + esc(cat.description) + '</p>' +
           '<ul class="ins-items">' + items + more + '</ul>' +
         '</details>';
     }).join("");
-    panel.innerHTML = html;
+
+    panel.innerHTML = html || '<p class="ins-empty">No insights match &ldquo;' + esc(state.insFilter) + '&rdquo;.</p>';
 
     Array.prototype.forEach.call(panel.querySelectorAll(".ins-item"), function (el) {
       el.addEventListener("click", function () {
         activateInsight(el.getAttribute("data-key"), el.getAttribute("data-id"));
+      });
+    });
+    Array.prototype.forEach.call(panel.querySelectorAll(".ins-more-btn"), function (el) {
+      el.addEventListener("click", function (e) {
+        e.preventDefault(); e.stopPropagation();
+        var k = el.getAttribute("data-key");
+        state.insLimits[k] = (state.insLimits[k] || INS_PAGE) + INS_PAGE;
+        renderInsightCategories();
       });
     });
   }
@@ -1003,6 +1537,7 @@
     if (btn) {
       btn.classList.add("active");
       var det = btn.closest("details"); if (det) det.open = true;
+      btn.scrollIntoView({ block: "nearest" }); // keep the activated item visible in a long list
     }
 
     state.selectedId = null;
@@ -1080,6 +1615,7 @@
     Array.prototype.forEach.call(body.querySelectorAll(".neighbor"), function (el) {
       el.addEventListener("click", function () {
         var nid = el.getAttribute("data-id");
+        state.detailStack = []; // entering node detail from an insight is a fresh start
         highlightNode(nid, true);
         centerOn(nid);
       });
@@ -1173,7 +1709,14 @@
     if (n.layer) rows.push('<div class="meta-row"><dt>Layer</dt><dd><span class="layer-tag" style="background:color-mix(in srgb,' + layerColor + ' 20%,transparent);color:' + layerColor + ';border:1px solid color-mix(in srgb,' + layerColor + ' 45%,transparent)">' + esc(n.layer) + '</span></dd></div>');
     if (n.routePath) rows.push(metaRow("Route", esc(n.routePath)));
 
+    var backId = state.detailStack.length ? state.detailStack[state.detailStack.length - 1] : null;
+    var backRec = backId ? nodeRecord(backId) : null;
     var html = '' +
+      (backRec
+        ? '<button class="detail-back" id="detail-back" title="Back to ' + esc(backRec.label) + '">' +
+            '<svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>' +
+            '<span>' + esc(backRec.label) + '</span></button>'
+        : '') +
       '<div class="detail-head">' +
         '<div class="detail-glyph ' + n.kind + '" style="border-color:' + layerColor + ';color:' + layerColor + '">' +
           (n.kind === "page" ? pageIcon() : fileIcon()) +
@@ -1193,7 +1736,13 @@
         ? '<div class="trace-row">' +
             '<button class="trace-btn" data-dir="up" title="Highlight everything that depends on this — within the current view">&uarr; Dependents</button>' +
             '<button class="trace-btn" data-dir="down" title="Highlight everything this depends on — within the current view">&darr; Dependencies</button>' +
-          '</div><div class="trace-hint">Shift-click another node to trace the shortest path.</div>'
+          '</div>' +
+          '<button class="trace-focus" id="focus-sub" title="Rebuild the graph with only this node and its 2-hop neighborhood">&#9678; Focus subgraph (2-hop)</button>' +
+          (n.package && !state.groupByPackage
+            ? '<button class="trace-focus" id="collapse-pkg" title="Fold every file in this package into a single supernode (click the supernode to expand)">&#9776; Collapse package &ldquo;' + esc(n.package) + '&rdquo;</button>'
+            : '') +
+          '<div class="trace-hint">Shift-click another node for the shortest path · ' +
+            (state.focusSubgraph ? '<b>Focused</b> — press Clear to exit.' : 'Focus isolates a node’s neighborhood.') + '</div>'
         : '') +
       '<dl class="meta-grid">' + rows.join("") + '</dl>' +
       neighborGroup("Outgoing", outgoing, id, edgeTypeBetween, true) +
@@ -1215,12 +1764,36 @@
     Array.prototype.forEach.call(body.querySelectorAll(".neighbor"), function (el) {
       el.addEventListener("click", function () {
         var nid = el.getAttribute("data-id");
+        state.detailStack.push(id); // remember where we drilled from
         highlightNode(nid, true);
         centerOn(nid);
       });
     });
+    var backBtn = document.getElementById("detail-back");
+    if (backBtn) backBtn.addEventListener("click", function () {
+      var prev = state.detailStack.pop();
+      if (prev == null) return;
+      highlightNode(prev, true); // re-renders the panel; stack is now one shorter
+      centerOn(prev);
+    });
     Array.prototype.forEach.call(body.querySelectorAll(".trace-btn"), function (el) {
       el.addEventListener("click", function () { tracePath(id, el.getAttribute("data-dir")); });
+    });
+    var focusBtn = document.getElementById("focus-sub");
+    if (focusBtn) focusBtn.addEventListener("click", function () {
+      state.focusSubgraph = { id: id, hops: 2 };
+      render(true);
+      var cy2 = state.cy; if (cy2) { highlightNode(id, false); cy2.fit(null, 60); }
+      showDetail(id); // refresh the panel so the hint shows "Focused — Clear to exit"
+    });
+    var collapseBtn = document.getElementById("collapse-pkg");
+    if (collapseBtn) collapseBtn.addEventListener("click", function () {
+      state.collapsedPackages.add(n.package);
+      state.selectedId = null;
+      closeDetail();
+      render(true, true);
+      syncUrl();
+      announce("Collapsed package " + n.package + " · click the supernode to expand");
     });
   }
 
@@ -1360,7 +1933,16 @@
     var activeIdx = -1;
     var matches = [];
 
-    function close() { box.classList.remove("show"); box.innerHTML = ""; activeIdx = -1; }
+    function close() {
+      box.classList.remove("show"); box.innerHTML = ""; activeIdx = -1;
+      input.setAttribute("aria-expanded", "false");
+      input.removeAttribute("aria-activedescendant");
+    }
+    // Keep aria-activedescendant pointing at the highlighted option for SR users.
+    function syncActiveDescendant() {
+      if (activeIdx >= 0 && matches[activeIdx]) input.setAttribute("aria-activedescendant", "sr-opt-" + activeIdx);
+      else input.removeAttribute("aria-activedescendant");
+    }
 
     // Which field matched the query — shown in the result row so a search by
     // route / feature / package explains itself.
@@ -1382,15 +1964,18 @@
           || (n.feature && n.feature.toLowerCase().indexOf(q) !== -1)
           || (n.package && n.package.toLowerCase().indexOf(q) !== -1);
       }).slice(0, 12);
-      if (!matches.length) { box.innerHTML = '<div class="sr-item" style="color:var(--ink-faint)">no matches</div>'; box.classList.add("show"); return; }
+      input.setAttribute("aria-expanded", "true");
+      if (!matches.length) { box.innerHTML = '<div class="sr-item" style="color:var(--ink-faint)">no matches</div>'; box.classList.add("show"); input.removeAttribute("aria-activedescendant"); return; }
       box.innerHTML = matches.map(function (n, i) {
-        return '<div class="sr-item' + (i === activeIdx ? ' active' : '') + '" data-id="' + esc(n.id) + '">' +
+        return '<div class="sr-item' + (i === activeIdx ? ' active' : '') + '" id="sr-opt-' + i + '" role="option"' +
+          ' aria-selected="' + (i === activeIdx ? "true" : "false") + '" data-id="' + esc(n.id) + '">' +
           '<span class="sr-kind">' + esc(n.kind) + '</span>' +
           '<span>' + esc(n.label) + '</span>' +
           '<span class="sr-path">' + esc(matchHint(n, q)) + '</span>' +
           '</div>';
       }).join("");
       box.classList.add("show");
+      syncActiveDescendant();
       Array.prototype.forEach.call(box.querySelectorAll(".sr-item[data-id]"), function (el) {
         el.addEventListener("click", function () { pick(el.getAttribute("data-id")); });
       });
@@ -1401,6 +1986,7 @@
       input.value = "";
       var n = nodeRecord(id);
       if (!n) return;
+      state.detailStack = []; // fresh selection from search resets drill history
       // ensure node is visible in current view; if not, switch to a view containing it
       ensureVisible(id, n);
       highlightNode(id, true);
@@ -1454,16 +2040,76 @@
     state.activeFeatures.clear();
     Array.prototype.forEach.call(document.querySelectorAll('#filter-feature .chip'), function (c) { c.classList.remove("on"); });
   }
+  // Reconcile sidebar chip "on" state with the active sets (robust to package
+  // names with special characters — avoids fragile attribute-selector escaping).
+  function syncSidebarChips() {
+    Array.prototype.forEach.call(document.querySelectorAll('#filter-package .chip'), function (c) {
+      c.classList.toggle("on", state.activePackages.has(c.getAttribute("data-pkg")));
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('#filter-feature .chip'), function (c) {
+      c.classList.toggle("on", state.activeFeatures.has(c.getAttribute("data-feat")));
+    });
+  }
+  // Floating bar over the canvas showing every active filter as a removable
+  // pill + "Clear all" — so a filter left on is always visible, never silent.
+  function renderActiveFilters() {
+    var bar = document.getElementById("active-filters");
+    if (!bar) return;
+    var pkgs = setToArray(state.activePackages);
+    var feats = setToArray(state.activeFeatures);
+    if (!pkgs.length && !feats.length) { bar.hidden = true; bar.innerHTML = ""; return; }
+    var html = '<span class="af-label">Filters</span>';
+    pkgs.forEach(function (p) {
+      html += '<button class="af-chip" data-kind="pkg" data-val="' + esc(p) + '" title="Remove this package filter">' +
+        '<span class="af-dot pkg"></span>' + esc(p) + '<span class="af-x">&times;</span></button>';
+    });
+    feats.forEach(function (f) {
+      html += '<button class="af-chip" data-kind="feat" data-val="' + esc(f) + '" title="Remove this feature filter">' +
+        '<span class="af-dot feat"></span>' + esc(f) + '<span class="af-x">&times;</span></button>';
+    });
+    html += '<button class="af-clear" id="af-clear" title="Remove all filters">Clear all</button>';
+    bar.innerHTML = html;
+    bar.hidden = false;
+    Array.prototype.forEach.call(bar.querySelectorAll(".af-chip"), function (el) {
+      el.addEventListener("click", function () {
+        var val = el.getAttribute("data-val");
+        if (el.getAttribute("data-kind") === "pkg") state.activePackages.delete(val);
+        else state.activeFeatures.delete(val);
+        syncSidebarChips();
+        renderKeepFilters();
+        syncUrl();
+      });
+    });
+    document.getElementById("af-clear").addEventListener("click", function () {
+      clearPackageFilters();
+      clearFeatureFilters();
+      renderKeepFilters();
+      syncUrl();
+    });
+  }
+
+  // Reflect the active view in ARIA + a roving tabindex (active tab is the only
+  // one in the tab order; arrow keys move between them).
+  function updateTabA11y() {
+    Array.prototype.forEach.call(document.querySelectorAll(".view-tab"), function (t) {
+      var on = t.classList.contains("active");
+      t.setAttribute("aria-selected", on ? "true" : "false");
+      t.setAttribute("tabindex", on ? "0" : "-1");
+    });
+  }
 
   // ---- View switching ----------------------------------------------------
   function switchView(view) {
     state.view = view;
+    state.focusSubgraph = null; // focus is per-view; switching exits it
     Array.prototype.forEach.call(document.querySelectorAll(".view-tab"), function (t) {
       t.classList.toggle("active", t.getAttribute("data-view") === view);
     });
+    updateTabA11y();
     document.getElementById("view-desc").textContent = VIEWS[view].desc;
     render(true);
     syncUrl();
+    announce(VIEWS[view].desc.split(" · ")[0] + " view");
   }
 
   // ---- Toolbar / toggles -------------------------------------------------
@@ -1482,22 +2128,36 @@
     var scrim = document.getElementById("scrim");
     if (scrim) scrim.addEventListener("click", closeDrawer);
 
-    Array.prototype.forEach.call(document.querySelectorAll(".view-tab"), function (t) {
+    var viewTabs = Array.prototype.slice.call(document.querySelectorAll(".view-tab"));
+    viewTabs.forEach(function (t, i) {
       t.addEventListener("click", function () {
         // Leaving an insight focus: drop pinned nodes + clear the active marker.
         state.focusInsight = null;
         clearInsightActive();
         switchView(t.getAttribute("data-view"));
       });
+      // ARIA tablist keyboard model: ←/→ (and Home/End) move + activate.
+      t.addEventListener("keydown", function (e) {
+        var idx = -1;
+        if (e.key === "ArrowRight" || e.key === "ArrowDown") idx = (i + 1) % viewTabs.length;
+        else if (e.key === "ArrowLeft" || e.key === "ArrowUp") idx = (i - 1 + viewTabs.length) % viewTabs.length;
+        else if (e.key === "Home") idx = 0;
+        else if (e.key === "End") idx = viewTabs.length - 1;
+        else return;
+        e.preventDefault();
+        var next = viewTabs[idx];
+        next.focus();
+        next.click();
+      });
     });
-    document.getElementById("btn-relayout").addEventListener("click", runLayout);
+    document.getElementById("btn-relayout").addEventListener("click", function () { runLayout(true); });
     document.getElementById("btn-fit").addEventListener("click", function () { state.cy.animate({ fit: { padding: 50 } }, { duration: 350 }); });
     document.getElementById("btn-reset").addEventListener("click", resetSelection);
 
     document.getElementById("toggle-groups").addEventListener("change", function (e) {
       state.groupByPackage = e.target.checked;
-      // Grouping is a topology change (compound parents) → full relayout.
-      render(true);
+      // Grouping is a topology change (compound parents) → full relayout, animated.
+      render(true, true);
       syncUrl();
     });
     document.getElementById("toggle-edgelabels").addEventListener("change", function (e) {
@@ -1508,6 +2168,11 @@
     document.getElementById("toggle-isolated").addEventListener("change", function (e) {
       state.showIsolated = e.target.checked;
       // Topology change (adds/removes many disconnected nodes) → full relayout.
+      render(true);
+      syncUrl();
+    });
+    document.getElementById("toggle-swimlanes").addEventListener("change", function (e) {
+      state.swimlanes = e.target.checked;
       render(true);
       syncUrl();
     });
@@ -1533,10 +2198,19 @@
     });
   }
 
+  // Push a message to the polite aria-live region for screen readers.
+  function announce(msg) {
+    var el = document.getElementById("a11y-live");
+    if (!el) return;
+    el.textContent = ""; // re-trigger announcement even if the text repeats
+    setTimeout(function () { el.textContent = msg; }, 30);
+  }
+
   function toast(msg) {
     var t = document.createElement("div");
     t.className = "toast"; t.textContent = msg;
     document.body.appendChild(t);
+    announce(msg); // toasts are visual-only otherwise — mirror them to SR users
     setTimeout(function () { t.remove(); }, 4000);
   }
 
@@ -1562,12 +2236,15 @@
       Array.prototype.forEach.call(document.querySelectorAll(".view-tab"), function (t) {
         t.classList.toggle("active", t.getAttribute("data-view") === state.view);
       });
+      updateTabA11y();
       var tg = document.getElementById("toggle-groups");
       if (tg) tg.checked = state.groupByPackage;
       var tl = document.getElementById("toggle-edgelabels");
       if (tl) tl.checked = state.edgeLabels;
       var ti = document.getElementById("toggle-isolated");
       if (ti) ti.checked = state.showIsolated;
+      var ts = document.getElementById("toggle-swimlanes");
+      if (ts) ts.checked = state.swimlanes;
 
       state.cy = window.cytoscape({
         container: document.getElementById("cy"),
@@ -1581,11 +2258,19 @@
       state.cy.on("tap", "node", function (evt) {
         var n = evt.target;
         if (n.data("isParent")) return;
+        if (n.data("isSuper")) { // expand a collapsed package back to its files
+          state.collapsedPackages.delete(n.data("pkg"));
+          render(true, true);
+          syncUrl();
+          announce("Expanded package " + n.data("pkg"));
+          return;
+        }
         // Shift-click a second node → trace shortest path from the selected one.
         if (evt.originalEvent && evt.originalEvent.shiftKey && state.selectedId && state.selectedId !== n.id()) {
           tracePathBetween(state.selectedId, n.id());
           return;
         }
+        state.detailStack = []; // a fresh canvas click starts a new drill history
         highlightNode(n.id(), true);
       });
       state.cy.on("tap", function (evt) {
@@ -1608,6 +2293,8 @@
       setupSearch();
       setupExport();
       setupSource();
+      setupMinimap();
+      setupHelp();
       window.addEventListener("resize", debounce(fitDeviceFrame, 150));
       // Server-only features: live updates + on-demand refine. A standalone
       // export has no server, so skip them.

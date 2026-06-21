@@ -8,6 +8,7 @@
 </head>
 <body>
   <div id="app">
+    <div id="a11y-live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
     <!-- ===== Header ===== -->
     <header id="header">
       <button id="sidebar-toggle" class="icon-btn sidebar-toggle" title="Toggle panels" aria-label="Toggle panels">
@@ -28,9 +29,13 @@
       <div class="header-actions">
         <div class="search-wrap">
           <svg viewBox="0 0 24 24" class="search-icon" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg>
-          <input id="search" type="text" placeholder="Search node…" autocomplete="off" spellcheck="false" />
-          <div id="search-results"></div>
+          <input id="search" type="text" placeholder="Search node…" autocomplete="off" spellcheck="false"
+                 role="combobox" aria-expanded="false" aria-controls="search-results" aria-autocomplete="list" aria-label="Search nodes" />
+          <div id="search-results" role="listbox" aria-label="Search results"></div>
         </div>
+        <button id="help-toggle" class="icon-btn" title="Help & legend" aria-label="Help and legend">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.2a2.4 2.4 0 1 1 3.6 2.2c-.8.5-1.2 1-1.2 1.9"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        </button>
         <button id="theme-toggle" class="icon-btn" title="Toggle dark mode" aria-label="Toggle dark mode">
           <svg class="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/><line x1="4.5" y1="4.5" x2="6.6" y2="6.6"/><line x1="17.4" y1="17.4" x2="19.5" y2="19.5"/><line x1="4.5" y1="19.5" x2="6.6" y2="17.4"/><line x1="17.4" y1="6.6" x2="19.5" y2="4.5"/></svg>
           <svg class="icon-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
@@ -56,6 +61,7 @@
             <h2 class="block-title">Insights</h2>
             <span class="ins-total" id="ins-total">0</span>
           </div>
+          <input id="ins-filter" class="ins-filter" type="text" placeholder="Filter insights…" autocomplete="off" spellcheck="false" hidden />
           <div id="insights-panel"><!-- populated by JS --></div>
         </section>
 
@@ -92,6 +98,11 @@
             <span class="switch"></span>
             <span>Show isolated nodes</span>
           </label>
+          <label class="switch-row">
+            <input type="checkbox" id="toggle-swimlanes" />
+            <span class="switch"></span>
+            <span>Layer swimlanes</span>
+          </label>
         </section>
 
         <section class="panel-block">
@@ -124,6 +135,8 @@
       <main id="canvas-wrap">
         <div id="cy"></div>
 
+        <div id="active-filters" hidden><!-- populated by JS when a filter is active --></div>
+
         <div id="toolbar">
           <button class="tool-btn" id="btn-relayout" title="Re-run layout">
             <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
@@ -154,6 +167,13 @@
         <div id="empty-state" hidden>
           <p>No nodes match this view &amp; filter combination.</p>
         </div>
+
+        <div id="minimap" hidden title="Drag to pan the graph">
+          <canvas id="minimap-canvas"></canvas>
+          <div id="minimap-view"></div>
+        </div>
+
+        <div id="swimlane-labels" hidden></div>
       </main>
 
       <!-- ===== Detail panel ===== -->
@@ -172,6 +192,16 @@
         <div class="code-head">
           <svg class="code-file-icon" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
           <span class="code-path" id="code-path"></span>
+          <div class="code-copy">
+            <button class="code-copy-btn" id="copy-path" title="Copy file path" aria-label="Copy file path">
+              <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span>Path</span>
+            </button>
+            <button class="code-copy-btn" id="copy-source" title="Copy source code" aria-label="Copy source code">
+              <svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+              <span>Source</span>
+            </button>
+          </div>
           <div class="code-tabs" id="code-tabs">
             <button class="code-tab active" id="tab-source" data-tab="source">Source</button>
             <button class="code-tab" id="tab-preview" data-tab="preview" hidden>Preview UI</button>
@@ -182,6 +212,54 @@
         <div class="code-body" id="code-body"></div>
         <div class="code-preview" id="code-preview" hidden></div>
         <div class="code-preview" id="code-live" hidden></div>
+      </div>
+    </div>
+
+    <!-- ===== Help / legend sheet ===== -->
+    <div id="help-modal" hidden>
+      <div class="help-card">
+        <div class="help-head">
+          <div>
+            <h2>PageMapper — quick guide</h2>
+            <p>How to read the map and move around it.</p>
+          </div>
+          <button class="code-close" id="help-close" title="Close (Esc)">&times;</button>
+        </div>
+        <div class="help-body">
+          <section class="help-sec">
+            <h3>Reading the graph</h3>
+            <ul class="legend legend-shape">
+              <li><span class="glyph glyph-page"></span> Page (a route)</li>
+              <li><span class="glyph glyph-file"></span> File</li>
+            </ul>
+            <p class="help-note">Node size grows with how connected it is — big nodes are hubs. Ring colour is the architectural layer:</p>
+            <ul class="legend">
+              <li><span class="swatch" data-layer="presentation"></span>Presentation</li>
+              <li><span class="swatch" data-layer="domain"></span>Domain</li>
+              <li><span class="swatch" data-layer="data"></span>Data</li>
+              <li><span class="swatch" data-layer="other"></span>Other</li>
+            </ul>
+            <ul class="legend">
+              <li><span class="edge-swatch" data-edge="import"></span>import</li>
+              <li><span class="edge-swatch" data-edge="navigate"></span>navigate</li>
+              <li><span class="edge-swatch" data-edge="uses"></span>uses</li>
+              <li><span class="edge-swatch" data-edge="api"></span>api</li>
+            </ul>
+          </section>
+          <section class="help-sec">
+            <h3>Get around</h3>
+            <dl class="help-keys">
+              <dt><kbd>/</kbd> <span>or</span> <kbd>Ctrl</kbd><kbd>K</kbd></dt><dd>Jump to search</dd>
+              <dt><kbd>Esc</kbd></dt><dd>Close a panel / clear selection</dd>
+              <dt>Click a node</dt><dd>Highlight it &amp; open its detail</dd>
+              <dt>Click a neighbour</dt><dd>Drill in — <b>‹ Back</b> returns</dd>
+              <dt>Shift-click</dt><dd>Trace the shortest path between two nodes</dd>
+              <dt>◎ Focus</dt><dd>Isolate a node&rsquo;s 2-hop neighbourhood</dd>
+              <dt>Minimap</dt><dd>Drag the corner overview to pan</dd>
+            </dl>
+            <p class="help-note">The four tabs up top switch what the graph means: <b>Page Flow</b> (navigation), <b>File Dependency</b> (imports), <b>Components</b> (widget usage), <b>API</b> (service calls).</p>
+          </section>
+        </div>
       </div>
     </div>
   </div>
