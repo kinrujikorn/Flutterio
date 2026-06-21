@@ -62,6 +62,7 @@
     activeFeatures: new Set(),   // empty => all
     groupByPackage: false,
     edgeLabels: true,
+    showIsolated: false,
     selectedId: null,
     canSource: false,  // server can serve file source (set from /capabilities)
     canPreview: false, // server can generate UI mockups
@@ -97,6 +98,7 @@
     }
     if (state.groupByPackage) parts.push("groups=1");
     if (!state.edgeLabels) parts.push("labels=0");
+    if (state.showIsolated) parts.push("iso=1");
     var hash = parts.length ? "#" + parts.join("&") : "";
     try {
       // replaceState (not pushState) so filter clicks don't spam Back history.
@@ -135,6 +137,7 @@
     }
     if (params.groups === "1") state.groupByPackage = true;
     if (params.labels === "0") state.edgeLabels = false;
+    if (params.iso === "1") state.showIsolated = true;
   }
 
   // ---- Data load with fallback ------------------------------------------
@@ -209,7 +212,7 @@
       // layout unreadable, so we drop them and report the count instead.
       // Exception: nodes pinned by an active insight (dead pages / orphan
       // files are isolated by definition — keep them so they can be located).
-      var keep = connected.has(id) || (state.focusInsight && state.focusInsight.has(id));
+      var keep = state.showIsolated || connected.has(id) || (state.focusInsight && state.focusInsight.has(id));
       if (!keep) { hiddenIsolated++; return; }
 
       var parentId = null;
@@ -1375,6 +1378,12 @@
       applyEdgeLabels();
       syncUrl();
     });
+    document.getElementById("toggle-isolated").addEventListener("change", function (e) {
+      state.showIsolated = e.target.checked;
+      // Topology change (adds/removes many disconnected nodes) → full relayout.
+      render(true);
+      syncUrl();
+    });
 
     // theme toggle (persisted). Dark is the default; light is opt-in.
     var saved = null;
@@ -1430,6 +1439,8 @@
       if (tg) tg.checked = state.groupByPackage;
       var tl = document.getElementById("toggle-edgelabels");
       if (tl) tl.checked = state.edgeLabels;
+      var ti = document.getElementById("toggle-isolated");
+      if (ti) ti.checked = state.showIsolated;
 
       state.cy = window.cytoscape({
         container: document.getElementById("cy"),
