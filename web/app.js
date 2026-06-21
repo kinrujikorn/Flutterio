@@ -604,6 +604,26 @@
     if (modal) modal.hidden = true;
   }
 
+  // Scale the fixed-size (412×892 logical) phone frame down to fit the modal —
+  // the app still lays out for a real phone width, so nothing gets squished; we
+  // just shrink the whole mockup visually (transform), compensating the layout
+  // box height with a negative margin so it stays centered without a scrollbar.
+  function fitDeviceFrame() {
+    var LW = 412, LH = 892;
+    var frames = document.querySelectorAll(".code-preview:not([hidden]) .preview-frame");
+    Array.prototype.forEach.call(frames, function (frame) {
+      var host = frame.closest(".code-preview");
+      if (!host || !host.clientHeight) return;
+      var note = host.querySelector(".preview-note");
+      var availH = host.clientHeight - (note ? note.offsetHeight : 0) - 34;
+      var availW = host.clientWidth - 30;
+      var s = Math.min(availW / LW, availH / LH, 1);
+      if (!isFinite(s) || s <= 0) s = 0.5;
+      frame.style.transform = "scale(" + s.toFixed(3) + ")";
+      frame.style.marginBottom = Math.round(-LH * (1 - s)) + "px";
+    });
+  }
+
   function showCodeTab(tab) {
     document.getElementById("tab-source").classList.toggle("active", tab === "source");
     document.getElementById("tab-preview").classList.toggle("active", tab === "preview");
@@ -614,6 +634,7 @@
     document.getElementById("code-live").hidden = tab !== "live";
     if (tab === "preview") loadPreview(state.codePath);
     if (tab === "live") loadLive(state.codePath);
+    if (tab !== "source") { requestAnimationFrame(fitDeviceFrame); setTimeout(fitDeviceFrame, 320); }
   }
 
   // Derive the Dart class name from a file path (venio convention:
@@ -1444,6 +1465,7 @@
       setupSearch();
       setupExport();
       setupSource();
+      window.addEventListener("resize", debounce(fitDeviceFrame, 150));
       // Server-only features: live updates + on-demand refine. A standalone
       // export has no server, so skip them.
       if (!window.__PM_GRAPH__) {
