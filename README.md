@@ -1,228 +1,212 @@
 # PageMapper
 
-Reads a Flutter/Dart project and visualizes how files and pages connect — as a
-beautiful, interactive graph in your browser.
+**See how your Flutter codebase fits together — as an interactive map in your browser.**
 
-Answers questions like *"which page navigates to which page?"* and *"what does
-this file depend on?"* across a whole monorepo.
+Point it at a Flutter/Dart project and it draws the connections: which page goes
+to which page, which file imports which file, and where the architecture is
+starting to tangle. Great for onboarding, code review, and untangling a big
+monorepo.
 
-![views: Page Flow · File Dependency · Components · API](docs/superpowers/specs/2026-06-20-pagemapper-design.md)
+It answers questions like:
+- *"Which screens can you reach from the dashboard?"*
+- *"What depends on this file — and what breaks if I change it?"*
+- *"Are we breaking our own architecture rules?"*
 
-## Quick start
+---
+
+## 1. Get it running (2 minutes)
 
 ```bash
 npm install
 npm run build
-node dist/cli.js <path-to-flutter-project>
+node dist/cli.js <path-to-your-flutter-project>
 ```
 
-This scans the project, builds the graph, starts a local server, and opens your
-browser. Example:
+Example:
 
 ```bash
 node dist/cli.js "C:/Users/kin/Documents/GitHub/venio-mobile-app"
 ```
 
-During development you can skip the build step:
+That scans the project, builds the map, starts a local server, and opens your
+browser. First paint is instant; a more accurate pass (Dart LSP) loads in the
+background and updates the page live — no refresh needed.
+
+> Developing PageMapper itself? Skip the build with `npm run dev -- <project>`.
+
+---
+
+## 2. What you're looking at
+
+The map has **four views** — switch them with the tabs at the top:
+
+| View | Shows | Answers |
+|------|-------|---------|
+| **Page Flow** | page → page navigation | "which screen leads to which screen?" |
+| **File Dependency** | file → file imports | "what depends on what?" |
+| **Components** | which widget is used where | "where is this component used?" |
+| **API** | calls to services / datasources | "what hits the backend?" |
+
+Every dot (node) is a file or a page, **colored by architecture layer**:
+🟪 presentation · 🟨 domain · 🟩 data · ⬜ other.
+
+In **Page Flow**, edge labels even show the route and the data passed along, e.g.
+`/customer/profile ‹customer.customerId›`.
+
+---
+
+## 3. Getting around
+
+- **Click a node** → a panel opens with its path, package, layer, and clickable
+  neighbors (what it points to / what points to it). Its connections light up; the
+  rest dims.
+- **Search** (top bar) → jump to any file or page by name.
+- **Filters** (left) → narrow to specific packages or features. *Group by package*
+  bundles a big monorepo into tidy clusters.
+- **Toolbar** → re-run layout, fit to screen, reset, download PNG/HTML.
+- **Shareable link** → your current view, filters, and toggles are saved in the
+  URL. Copy the link and a teammate opens the *exact* same view.
+
+---
+
+## 4. Insights — find the problems automatically
+
+The **Insights** panel (left side) lints the architecture and lists what it finds.
+Click any finding and the map jumps to it and highlights exactly the files/edges
+involved.
+
+| Finding | What it means |
+|---------|---------------|
+| **Layer violations** | a core layer importing an outer one (e.g. `domain → data`) — breaks clean architecture |
+| **Cross-feature deep imports** | a feature reaching into another feature's `src/` internals instead of its public API |
+| **Circular dependencies** | files that import each other in a loop |
+| **God files** | files that far too many things depend on (or that depend on far too much) |
+| **Unreachable pages** | screens nothing navigates to — possibly dead |
+| **Deep pages** | screens buried many taps from the entry |
+| **Orphan files** | files with no imports in or out — possible dead code |
+
+Below it, the **Coupling** dashboard rates each package's *Instability* (how much
+it depends outward vs. how much depends on it) and flags the "watch zone" —
+packages many things rely on that are still churning. Click a package to light it
+up on the map.
+
+Everything here is computed deterministically from the code — no guessing, no AI.
+
+---
+
+## 5. See what a page actually is
+
+Click a node → **View source** opens its real `.dart` file. The code viewer has
+three tabs:
+
+- **Source** — the actual file.
+- **Preview UI** — a quick *wireframe* of the page, built by parsing its widget
+  tree (Scaffold/AppBar/Column/buttons/Text…) into HTML. It resolves your own
+  design-system widgets, real theme colors, and localized strings. It's a
+  structural sketch — offline and free, no AI — not the live app.
+- **Live ✦** — the **real page** running in the actual Flutter engine. See below.
+
+### Live ✦ — the real running page
+
+For a faithful, real-engine preview, PageMapper can embed the **actual app**
+compiled to Flutter Web and deep-link to a page's route:
 
 ```bash
-npm run dev -- <path-to-flutter-project>      # via tsx
+node dist/cli.js <project> --app-url http://localhost:4572
 ```
 
-### Options
+Now the Live tab shows the genuine page — real widgets, theme, and fonts. Because
+there's no backend in a preview, data comes from **recorded fixtures** (so pages
+show realistic content offline instead of spinning forever). This needs a one-time
+setup in the target app (a preview entry point + recorded data) — see
+[CLAUDE.md](CLAUDE.md) for the full how-to. If you don't set it up, the Source and
+Preview UI tabs still work everywhere.
+
+---
+
+## 6. Share a map
+
+- **PNG** — the toolbar button downloads the current view as an image.
+- **Standalone HTML** — one self-contained file (graph + UI + fonts all inlined)
+  that opens offline in any browser, no server:
+
+  ```bash
+  node dist/cli.js <project> --export map.html
+  ```
+
+  Send the file, or host it anywhere static. (CLI export runs the accurate LSP
+  analysis first.)
+
+---
+
+## 7. Use it in CI (catch regressions)
+
+`--check` runs the analysis once and **fails the build** if there are too many
+problems — great as a pull-request gate:
+
+```bash
+# fail if any high-severity finding (layer violation, cycle, cross-feature import) exists
+node dist/cli.js <project> --no-open --check --max-high 0
+```
+
+It prints a per-category report and exits non-zero when a threshold is crossed.
+Thresholds: `--max-high <n>` (default 0), `--max-total <n>` (default unlimited).
+
+---
+
+## 8. Accuracy & live updates (good to know)
+
+- **Dart LSP** — if the Dart SDK is on your PATH, PageMapper uses the real Dart
+  analysis server for precise results (correct classes, real `uses`/`api` edges
+  instead of guesses). It runs in the background and updates the page live. Run
+  `flutter pub get` in the target project first for best results. Skip it with
+  `--no-lsp`. Re-run anytime with the **Re-run LSP** toolbar button.
+- **Watch** — edits to the project update the map automatically (your view,
+  filters, and selection are preserved). Turn it off with `--no-watch` for a
+  fixed snapshot. Switch git branches and the map follows.
+
+---
+
+## All options
 
 Watch and LSP are **on by default**.
 
 | flag | meaning |
 |------|---------|
-| `--port <n>` | server port (default: first free from 4567) |
+| `--port <n>` | server port (default 4567, picks next free) |
 | `--no-open` | don't auto-open the browser |
-| `--no-watch` | disable live updates (analyze once, serve a static snapshot) |
-| `--no-lsp` | skip the Dart LSP refine (heuristic analysis only) |
-| `--catalog <url>` | base URL of a built component catalog for faithful Live previews |
-| `--catalog-build <dir>` | catalog app dir; on watch changes, auto-rebuild it (`flutter build web`) |
-| `--json <file>` | write the graph JSON to a file and exit (no server) |
-| `--export <file.html>` | write a self-contained interactive HTML file and exit |
+| `--no-watch` | analyze once, serve a static snapshot |
+| `--no-lsp` | heuristic analysis only (no Dart LSP) |
+| `--json <file>` | write the graph JSON and exit |
+| `--export <file.html>` | write a standalone interactive HTML and exit |
+| `--check` | CI mode: report + exit non-zero past thresholds |
+| `--max-high <n>` / `--max-total <n>` | `--check` thresholds |
+| `--app-url <url>` | base URL of the real app on Flutter Web (Live tab) |
+| `--catalog <url>` / `--catalog-build <dir>` | component-catalog URL / auto-rebuilt catalog dir |
 
-### Sharing / export
-
-Two ways to share a graph:
-
-- **PNG** — the toolbar **PNG** button downloads the current view as an image.
-- **Standalone HTML** — one self-contained, fully interactive file (graph data,
-  Cytoscape, the stylesheet, and fonts all inlined) that opens offline in any
-  browser with no server. Get it from the toolbar **HTML** button, or the CLI:
-
-  ```bash
-  node dist/cli.js <path-to-flutter-project> --export graph.html
-  ```
-
-  The CLI export runs the accurate LSP analysis first (unless `--no-lsp`).
-
-### Accuracy: Dart LSP refine
-
-If the Dart SDK is on your PATH, PageMapper uses the real **Dart analysis
-server** (`dart language-server`) for accurate results — proper class detection,
-widget/page/service classification, and reference-based `uses` and `api` edges
-instead of token guesses. On the venio repo this cut `uses` edges from 422 to
-~128 (false positives removed, real ones added) and turned `api` edges into
-links to the **real service files** (e.g. a use-case → `auth_repository.dart`)
-instead of synthetic endpoint nodes.
-
-To stay snappy, the browser **opens immediately** with the fast heuristic graph,
-then the LSP pass runs in the background (~tens of seconds on a large repo) and
-the accurate graph is **pushed to the open page live** — no refresh. If Dart
-isn't installed or the analysis fails, it silently keeps the heuristic graph.
-The `navigate` and `import` views are identical either way; `uses`/`api` differ.
-Use `--no-lsp` to skip it entirely.
-
-You can also re-run the analysis on demand with the **Re-run LSP** button in the
-graph toolbar (handy after edits, since live watch rebuilds use the fast
-heuristic). It re-analyzes on the server and live-updates the open page.
-
-> Tip: run `flutter pub get` / `dart pub get` in the target project first so the
-> analyzer can resolve external supertypes (e.g. `StatelessWidget`) for fully
-> accurate classification.
-
-### Live updates (watch)
-
-Edits to the project update the graph automatically — a debounced file watcher
-re-analyzes whenever a `.dart` file changes and pushes the new graph to the
-browser over Server-Sent Events. The open page updates in place: your current
-view, filters, and selection are preserved, and the camera only re-fits when the
-set of nodes actually changes.
-
-Each change pushes the **fast heuristic graph immediately**, then — debounced
-longer so rapid saves coalesce — automatically (a) re-runs the **LSP refine**
-for accuracy (when `--lsp`) and (b) rebuilds the **Live catalog** and refreshes
-the open Live preview (when `--catalog-build <dir>` is set; needs Flutter on
-PATH). So switching git branches or editing widgets keeps the graph, accuracy,
-and faithful previews all current with no manual step. Use `--no-watch` for a
-static snapshot.
-
-## The graph
-
-Four views, switchable in the UI:
-
-- **Page Flow** — `page → page` navigation (`context.go/push`, go_router routes).
-  The clearest answer to "which page connects to which page". Edge labels show
-  the route and any `extra:` payload handed to the next page, e.g.
-  `/customer/profile ‹customer.customerId›`. Isolated pages are hidden (count
-  shown in the view label).
-- **File Dependency** — `import` edges between files, colored by layer. Use the
-  package filter / *Group by package* toggle to tame large monorepos.
-- **Components** — widget/component usage (`uses` edges).
-- **API** — service / datasource / HTTP call edges.
-
-Nodes are colored by Clean-Architecture layer (presentation / domain / data /
-other). Click any node for a detail panel (path, package, feature, route, and
-clickable in/out neighbors) — its neighborhood highlights, the rest dims. The
-panel also has a **View source** button that opens the node's actual `.dart`
-file in a code viewer (served on demand from the project). Search jumps to any
-node; filters narrow by package and feature.
-
-### UI preview (widget-tree mockup)
-
-In the code viewer, a **Preview UI** tab renders an approximate mockup of how
-the page would look. Flutter widgets can't be rendered faithfully from static
-source (that needs the running app with its real state and dependencies), so
-this parses the widget tree in the page's `build()` method and maps known
-widgets (Scaffold, AppBar, Column/Row, buttons, Text, ListView, TextField, …)
-to HTML/CSS — a structural wireframe, not the live app.
-
-It is **deterministic, offline, and free** — no AI, no API key, no network. To
-look closer to the real app, the renderer also:
-
-- **Resolves the app's own widgets** — when it hits a custom widget (e.g. a
-  design-system `VenTextField`/`VenPrimaryButton`), it finds that class in the
-  project and renders *its* `build()` tree, so components show their real shapes
-  (recursively, with depth + cycle guards).
-- **Uses real theme colors** — `Color(0x…)` literals and color tokens
-  (`VenColors.primary`, …) are resolved to the project's actual hex values.
-- **Humanizes localization keys** — `context.t('auth.login.sign_in')` → "Sign In".
-
-The mockup renders in a sandboxed phone frame (no scripts) and is cached per
-file (content-hashed). It's still a structural approximation — widgets whose
-look depends on constructor args or runtime state, and values from APIs, show as
-placeholders.
-
-### Faithful render (Live ✦) — real Flutter engine
-
-For a pixel-faithful preview, point PageMapper at a built **Flutter-Web
-component catalog** (Widgetbook-style):
-
-```bash
-node dist/cli.js <project> --catalog http://localhost:4571
-```
-
-When set, the code viewer gains a **Live ✦** tab that embeds
-`<catalogUrl>?widget=<ClassName>` in a phone frame — the component rendered by
-the *actual Flutter engine* (real theme, fonts, states), not an approximation.
-The node's class is derived from its file (snake_case → PascalCase); widgets
-without a catalog entry fall back to the catalog index.
-
-The catalog lives in the Flutter project (e.g. `apps/preview_catalog/` — a tiny
-app that depends on the design-system package and maps `?widget=<Name>` to a
-real component; add a component with one line in its `catalog` map). One-time
-setup:
-1. Run codegen so generated parts exist: `dart run build_runner build` in
-   packages using `freezed`/`json_serializable` (e.g. `packages/core`).
-2. Build it: `cd apps/preview_catalog && flutter build web --pwa-strategy=none`.
-3. Serve `build/web` (any static server) and pass its URL via `--catalog`:
-   `npx http-server apps/preview_catalog/build/web -p 4571` then
-   `pagemapper <project> --catalog http://localhost:4571`.
-
-**Scope:** this is faithful for **components** (design-system widgets take simple
-props, so a catalog entry is cheap). Full **pages** additionally need their
-runtime mocked (BLoC/Cubit + DI graph + localization + router) — author those
-incrementally as catalog entries; until then pages use the deterministic
-preview. Notes: the app must build for web (web-incompatible plugins like
-secure-storage/local-auth need stubbing; iOS `.xcassets` asset declarations may
-need web-conditionalizing).
+---
 
 ## How it works
 
 ```
-scan (find .dart + packages) → parse (imports, navigation, widgets, API)
-  → build graph (typed nodes/edges) → serve web UI (Cytoscape.js)
+scan .dart + packages → parse (imports, navigation, widgets, API)
+  → build typed graph → compute insights → serve web UI (Cytoscape.js)
 ```
 
-- **Scanner** (`src/scanner.ts`) — walks `.dart` files, reads `pubspec.yaml` to
-  map packages, classifies each file into package/feature/layer.
-- **Parser** (`src/parser/*`) — fast regex/heuristic extraction of imports,
-  go_router pages + navigation, widget usage, and service calls.
-- **LSP analyzer** (`src/lsp/*`) — drives `dart language-server` for accurate
-  class detection, classification, and reference-based `uses` edges; merges over
-  the heuristic baseline. Returns `null` (→ heuristic fallback) if Dart is
-  absent or analysis fails.
-- **Graph builder** (`src/graph-builder.ts`) — merges into a single `GraphData`
-  (the contract in `src/types.ts`).
-- **Export** (`src/export.ts`) — inlines the UI + data + fonts into one
-  portable, offline HTML file (scripts embedded as base64 `data:` URIs).
-- **Preview** (`src/preview.ts`) — deterministic parser that turns a page's
-  `build()` widget tree into an HTML/CSS wireframe (no AI, no network).
-- **Web UI** (`web/`) — vanilla JS + Cytoscape.js (`fcose` layout). A calm,
-  minimal dark theme (light toggle, persisted) with **Hanken Grotesk** as the
-  typeface. All dependencies — including the font — are vendored under
-  `web/vendor/`, so it works fully offline.
+Node + TypeScript backend (raw HTTP server, no framework); a vanilla-JS +
+Cytoscape.js front end with everything (libs + fonts) vendored, so it runs fully
+offline. Architecture details and contributor notes live in
+[CLAUDE.md](CLAUDE.md).
 
-## Limitations (v1)
+## Limitations
 
-- Dart/Flutter only.
-- Navigation resolves route literals and `Page.routePath` constants; fully
-  dynamic route construction may not resolve a target.
-- Without the LSP refine (no Dart SDK, or `--no-lsp`), `uses` / `api` edges fall
-  back to token heuristics and can over-match. The LSP pass fixes both.
-- The LSP refine spawns a fresh analysis server per run, so live (watch)
-  rebuilds use the heuristic for speed — use **Re-run LSP** to refresh accuracy.
-
-See [the design spec](docs/superpowers/specs/2026-06-20-pagemapper-design.md)
-for the full design.
+- Flutter/Dart only.
+- Very dynamic route construction may not resolve a navigation target.
+- Without the Dart LSP, `uses`/`api` edges fall back to heuristics and can
+  over-match (the LSP pass fixes this).
 
 ## Tests
 
 ```bash
 npm test
 ```
-
-Unit tests for each parser plus a smoke test against a real repo.
