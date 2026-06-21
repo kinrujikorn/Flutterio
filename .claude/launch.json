@@ -16,7 +16,7 @@
         "--catalog-build",
         "C:/Users/kin/Documents/GitHub/venio-mobile-app/apps/preview_catalog",
         "--app-url",
-        "http://localhost:4572"
+        "https://flutterio-preview.vercel.app"
       ],
       "port": 4567
     },

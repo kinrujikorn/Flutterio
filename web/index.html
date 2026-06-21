@@ -10,6 +10,9 @@
   <div id="app">
     <!-- ===== Header ===== -->
     <header id="header">
+      <button id="sidebar-toggle" class="icon-btn sidebar-toggle" title="Toggle panels" aria-label="Toggle panels">
+        <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
       <div class="brand">
         <div class="brand-mark" aria-hidden="true">
           <span class="node-dot d1"></span><span class="node-dot d2"></span><span class="node-dot d3"></span>
@@ -45,6 +48,7 @@
     </nav>
 
     <div id="main">
+      <div id="scrim" aria-hidden="true"></div>
       <!-- ===== Left filter rail ===== -->
       <aside id="sidebar">
         <section class="panel-block" id="insights-block" hidden>

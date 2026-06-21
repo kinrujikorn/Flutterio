@@ -117,10 +117,13 @@ node dist/cli.js <project> --app-url http://localhost:4572
 
 Now the Live tab shows the genuine page — real widgets, theme, and fonts. Because
 there's no backend in a preview, data comes from **recorded fixtures** (so pages
-show realistic content offline instead of spinning forever). This needs a one-time
-setup in the target app (a preview entry point + recorded data) — see
-[CLAUDE.md](CLAUDE.md) for the full how-to. If you don't set it up, the Source and
-Preview UI tabs still work everywhere.
+show realistic content offline instead of spinning forever).
+
+You build the venio web bundle **once** and host it as a static site; then anyone
+who clones PageMapper just passes that URL via `--app-url` and Live works — **no
+Flutter needed on their machine**. Full step-by-step in
+**[DEPLOY-LIVE.md](DEPLOY-LIVE.md)** (and `scripts/build-venio-preview.ps1`). If
+it's not set up, the Source and Preview UI tabs still work everywhere.
 
 ---
 

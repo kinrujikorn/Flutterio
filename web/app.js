@@ -267,40 +267,47 @@
           "text-outline-width": 2.4,
           "text-outline-opacity": 1,
           "text-valign": "bottom",
-          "text-margin-y": 6,
+          "text-margin-y": 7,
           "text-wrap": "wrap",
           "text-max-width": "120px",
-          "width": 34, "height": 34,
-          "border-width": 2.5,
+          "min-zoomed-font-size": 7,
+          "width": 30, "height": 30,
+          "border-width": 1.5,
           "background-color": surface2,
-          "transition-property": "opacity, border-width, background-color, text-opacity",
-          "transition-duration": "180ms"
+          "transition-property": "opacity, border-width, width, height, underlay-opacity, background-opacity",
+          "transition-duration": "200ms"
         }
       },
-      // file = round, colored ring with a faint layer-tinted core
+      // file = round, neutral fill + thin layer ring + soft layer-tinted halo
       {
         selector: 'node[kind = "file"]',
         style: {
           "shape": "ellipse",
+          "background-color": surface2,
+          "background-opacity": 1,
           "border-color": function (n) { return layerColor[n.data("layer")] || layerColor.other; },
-          "border-opacity": 0.95,
-          "background-color": function (n) { return layerColor[n.data("layer")] || layerColor.other; },
-          "background-opacity": 0.10
+          "border-opacity": 0.85,
+          "underlay-color": function (n) { return layerColor[n.data("layer")] || layerColor.other; },
+          "underlay-opacity": 0.09,
+          "underlay-padding": 3,
+          "underlay-shape": "ellipse"
         }
       },
-      // page = rounded square, filled + glowing halo
+      // page = rounded square, neutral fill + layer ring + glowing halo
       {
         selector: 'node[kind = "page"]',
         style: {
           "shape": "round-rectangle",
           "width": 46, "height": 40,
+          "background-color": surface,
+          "background-opacity": 1,
+          "border-width": 2,
           "border-color": function (n) { return layerColor[n.data("layer")] || layerColor.other; },
-          "background-color": function (n) { return layerColor[n.data("layer")] || layerColor.other; },
-          "background-opacity": 0.22,
+          "border-opacity": 0.95,
           "font-weight": "bold",
           "underlay-color": function (n) { return layerColor[n.data("layer")] || layerColor.other; },
-          "underlay-opacity": 0.12,
-          "underlay-padding": 4,
+          "underlay-opacity": 0.15,
+          "underlay-padding": 6,
           "underlay-shape": "round-rectangle"
         }
       },
@@ -328,14 +335,15 @@
       {
         selector: "edge",
         style: {
-          "width": 1.6,
+          "width": 1.3,
           "line-color": function (e) { return edgeColor[e.data("etype")] || faint; },
-          "line-opacity": 0.7,
+          "line-opacity": 0.5,
+          "line-cap": "round",
           "target-arrow-color": function (e) { return edgeColor[e.data("etype")] || faint; },
           "target-arrow-shape": "triangle",
-          "arrow-scale": 0.9,
+          "arrow-scale": 0.85,
           "curve-style": "bezier",
-          "opacity": 0.7,
+          "opacity": 0.6,
           "font-family": "Cascadia Code, Consolas, monospace",
           "font-size": "9px",
           "color": ink,
@@ -355,24 +363,30 @@
       { selector: 'edge[etype = "navigate"]', style: { "width": 2.4, "target-arrow-shape": "triangle-backcurve", "opacity": 0.92 } },
       // edge labels toggle
       { selector: "edge.show-label", style: { "label": "data(label)" } },
+      // hover affordance (class toggled by mouseover/mouseout in init)
+      {
+        selector: "node.cyhover",
+        style: { "border-color": accent, "border-width": 2.5, "underlay-color": accent, "underlay-opacity": 0.18, "underlay-padding": 5, "z-index": 15 }
+      },
       // highlight states
       { selector: ".faded", style: { "opacity": 0.07, "text-opacity": 0, "underlay-opacity": 0 } },
       {
         selector: "node.highlight",
-        style: { "border-width": 3.5, "opacity": 1 }
+        style: { "border-width": 3, "opacity": 1, "underlay-color": accent, "underlay-opacity": 0.26, "underlay-padding": 7, "z-index": 20 }
       },
       {
         selector: "node.focus",
         style: {
-          "border-width": 4,
+          "border-width": 3.5,
           "border-color": accent,
           "underlay-color": accent,
-          "underlay-opacity": 0.34,
+          "underlay-opacity": 0.36,
           "underlay-padding": 11,
-          "underlay-shape": "ellipse"
+          "underlay-shape": "ellipse",
+          "z-index": 25
         }
       },
-      { selector: "edge.highlight", style: { "opacity": 1, "line-opacity": 1, "width": 3.2, "label": "data(label)" } }
+      { selector: "edge.highlight", style: { "opacity": 1, "line-opacity": 1, "width": 2.6, "z-index": 18, "label": "data(label)" } }
     ];
   }
 
@@ -901,6 +915,7 @@
     if (!found) return;
     var item = found.item;
 
+    closeDrawer();
     clearInsightActive();
     var btn = document.querySelector('.ins-item[data-key="' + catKey + '"][data-id="' + cssEsc(itemId) + '"]');
     if (btn) {
@@ -1027,6 +1042,7 @@
 
   // Light up a whole package + its cross-package import edges in the file view.
   function highlightPackage(pkg) {
+    closeDrawer();
     state.focusInsight = null;
     clearInsightActive();
     if (state.view !== "file") switchView("file"); else render(true);
@@ -1300,7 +1316,21 @@
   }
 
   // ---- Toolbar / toggles -------------------------------------------------
+  // Close the responsive sidebar drawer (no-op on desktop where it's docked).
+  function closeDrawer() {
+    var a = document.getElementById("app");
+    if (a) a.classList.remove("sidebar-open");
+  }
+
   function setupControls() {
+    // Responsive: hamburger toggles the sidebar drawer; scrim taps close it.
+    var sbToggle = document.getElementById("sidebar-toggle");
+    if (sbToggle) sbToggle.addEventListener("click", function () {
+      document.getElementById("app").classList.toggle("sidebar-open");
+    });
+    var scrim = document.getElementById("scrim");
+    if (scrim) scrim.addEventListener("click", closeDrawer);
+
     Array.prototype.forEach.call(document.querySelectorAll(".view-tab"), function (t) {
       t.addEventListener("click", function () {
         // Leaving an insight focus: drop pinned nodes + clear the active marker.
@@ -1396,6 +1426,17 @@
       });
       state.cy.on("tap", function (evt) {
         if (evt.target === state.cy) resetSelection();
+      });
+      // hover affordance — light up the node + its neighborhood without committing
+      state.cy.on("mouseover", "node", function (evt) {
+        var n = evt.target;
+        if (n.data("isParent")) return;
+        n.addClass("cyhover");
+        document.body.style.cursor = "pointer";
+      });
+      state.cy.on("mouseout", "node", function (evt) {
+        evt.target.removeClass("cyhover");
+        document.body.style.cursor = "";
       });
       state.cy.on("zoom", debounce(applyEdgeLabels, 120));
 
