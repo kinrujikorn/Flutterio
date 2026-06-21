@@ -340,13 +340,13 @@
         style: {
           "width": 1.3,
           "line-color": function (e) { return edgeColor[e.data("etype")] || faint; },
-          "line-opacity": 0.5,
+          "line-opacity": 0.7,
           "line-cap": "round",
           "target-arrow-color": function (e) { return edgeColor[e.data("etype")] || faint; },
           "target-arrow-shape": "triangle",
           "arrow-scale": 0.85,
           "curve-style": "bezier",
-          "opacity": 0.6,
+          "opacity": 0.9,
           "font-family": "Cascadia Code, Consolas, monospace",
           "font-size": "9px",
           "color": ink,
@@ -372,6 +372,7 @@
         style: { "border-color": accent, "border-width": 2.5, "underlay-color": accent, "underlay-opacity": 0.18, "underlay-padding": 5, "z-index": 15 }
       },
       // highlight states
+      { selector: "node.lod-hide", style: { "text-opacity": 0 } },
       { selector: ".faded", style: { "opacity": 0.07, "text-opacity": 0, "underlay-opacity": 0 } },
       {
         selector: "node.highlight",
@@ -441,9 +442,63 @@
       if (show && e.data("label")) e.addClass("show-label");
       else e.removeClass("show-label");
     });
+    applyNodeLOD();
+  }
+
+  // Level-of-detail: when zoomed out on a big graph, hide labels except on hub
+  // (high-degree) and selected/highlighted nodes — only landmarks stay legible.
+  function applyNodeLOD() {
+    var cy = state.cy;
+    if (!cy) return;
+    var nodes = cy.nodes('[!isParent]');
+    var thin = cy.zoom() < 0.55 && nodes.length > 120;
+    nodes.forEach(function (n) {
+      if (thin && (n.data("degree") || 0) < 6 && !n.hasClass("focus") && !n.hasClass("highlight")) n.addClass("lod-hide");
+      else n.removeClass("lod-hide");
+    });
   }
 
   // ---- Render the graph for current state -------------------------------
+  // Show the "no nodes" overlay; when filtering or hiding caused it, offer
+  // recovery actions (clear filters / reveal isolated nodes) instead of a dead end.
+  function renderEmptyState() {
+    var el = document.getElementById("empty-state");
+    var cy = state.cy;
+    var empty = !!cy && cy.nodes('[!isParent]').length === 0;
+    el.hidden = !empty;
+    if (!empty) return;
+    var btns = "";
+    if (state.activePackages.size || state.activeFeatures.size) btns += '<button class="es-btn" data-act="clear">Clear filters</button>';
+    if (state.hiddenIsolated > 0 && !state.showIsolated) btns += '<button class="es-btn" data-act="iso">Show isolated nodes</button>';
+    el.innerHTML = '<div class="es-inner"><p>No nodes match this view &amp; filter combination.</p>' +
+      (btns ? '<div class="es-actions">' + btns + '</div>' : '') + '</div>';
+    var c = el.querySelector('[data-act="clear"]');
+    if (c) c.addEventListener("click", function () { clearPackageFilters(); clearFeatureFilters(); renderKeepFilters(); syncUrl(); });
+    var iso = el.querySelector('[data-act="iso"]');
+    if (iso) iso.addEventListener("click", function () {
+      state.showIsolated = true;
+      var t = document.getElementById("toggle-isolated"); if (t) t.checked = true;
+      render(true); syncUrl();
+    });
+  }
+
+  // Scale file nodes by connection count so hubs read bigger than leaves.
+  // Recomputed per render (each view drops isolated nodes, changing degree).
+  // sqrt keeps a few mega-hubs from dwarfing everything; pages keep a fixed size.
+  function sizeNodesByDegree() {
+    var cy = state.cy;
+    if (!cy) return;
+    var files = cy.nodes('[kind = "file"]');
+    var maxDeg = 1;
+    files.forEach(function (n) { var d = n.degree(false); if (d > maxDeg) maxDeg = d; });
+    files.forEach(function (n) {
+      var d = n.degree(false);
+      n.data("degree", d);
+      var sz = 24 + Math.round((58 - 24) * Math.sqrt(d / maxDeg));
+      n.style({ width: sz, height: sz });
+    });
+  }
+
   function render(relayout) {
     var els = buildElements();
     var cy = state.cy;
@@ -451,8 +506,9 @@
     cy.elements().remove();
     cy.add(els);
     cy.endBatch();
+    sizeNodesByDegree();
 
-    document.getElementById("empty-state").hidden = cy.nodes('[!isParent]').length > 0;
+    renderEmptyState();
 
     // Append a "(N isolated hidden)" note to the view description.
     var descEl = document.getElementById("view-desc");
@@ -491,8 +547,9 @@
     cy.elements().remove();
     cy.add(els);
     cy.endBatch();
+    sizeNodesByDegree();
 
-    document.getElementById("empty-state").hidden = cy.nodes('[!isParent]').length > 0;
+    renderEmptyState();
     var descEl = document.getElementById("view-desc");
     var base = VIEWS[state.view].desc;
     descEl.textContent = state.hiddenIsolated ? base + " · " + state.hiddenIsolated + " isolated hidden" : base;
@@ -805,8 +862,9 @@
       cy.elements().remove();
       cy.add(els);
       cy.endBatch();
+      sizeNodesByDegree();
 
-      document.getElementById("empty-state").hidden = cy.nodes('[!isParent]').length > 0;
+      renderEmptyState();
       var descEl = document.getElementById("view-desc");
       descEl.textContent = state.hiddenIsolated
         ? VIEWS[state.view].desc + " · " + state.hiddenIsolated + " isolated hidden"
@@ -1112,7 +1170,7 @@
     rows.push(metaRow("Path", esc(n.path)));
     if (n.package) rows.push(metaRow("Package", esc(n.package)));
     if (n.feature) rows.push(metaRow("Feature", esc(n.feature)));
-    if (n.layer) rows.push('<div class="meta-row"><dt>Layer</dt><dd><span class="layer-tag" style="background:' + layerColor + '">' + esc(n.layer) + '</span></dd></div>');
+    if (n.layer) rows.push('<div class="meta-row"><dt>Layer</dt><dd><span class="layer-tag" style="background:color-mix(in srgb,' + layerColor + ' 20%,transparent);color:' + layerColor + ';border:1px solid color-mix(in srgb,' + layerColor + ' 45%,transparent)">' + esc(n.layer) + '</span></dd></div>');
     if (n.routePath) rows.push(metaRow("Route", esc(n.routePath)));
 
     var html = '' +
@@ -1130,6 +1188,12 @@
         ? '<button class="code-btn" id="view-code">' +
             '<svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>' +
             '<span>View source</span></button>'
+        : '') +
+      (id.indexOf("svc:") !== 0
+        ? '<div class="trace-row">' +
+            '<button class="trace-btn" data-dir="up" title="Highlight everything that depends on this — within the current view">&uarr; Dependents</button>' +
+            '<button class="trace-btn" data-dir="down" title="Highlight everything this depends on — within the current view">&darr; Dependencies</button>' +
+          '</div><div class="trace-hint">Shift-click another node to trace the shortest path.</div>'
         : '') +
       '<dl class="meta-grid">' + rows.join("") + '</dl>' +
       neighborGroup("Outgoing", outgoing, id, edgeTypeBetween, true) +
@@ -1155,6 +1219,45 @@
         centerOn(nid);
       });
     });
+    Array.prototype.forEach.call(body.querySelectorAll(".trace-btn"), function (el) {
+      el.addEventListener("click", function () { tracePath(id, el.getAttribute("data-dir")); });
+    });
+  }
+
+  // Trace the transitive reach of a node (within the current view): predecessors
+  // (everything that depends on it) or successors (everything it depends on).
+  function tracePath(id, dir) {
+    var cy = state.cy;
+    var node = cy.getElementById(id);
+    if (node.empty()) return;
+    var reach = dir === "up" ? node.predecessors() : node.successors();
+    var set = reach.union(node);
+    cy.elements().addClass("faded");
+    set.removeClass("faded");
+    set.nodes().addClass("highlight");
+    set.edges().addClass("highlight");
+    node.removeClass("highlight").addClass("focus");
+    applyEdgeLabels();
+    state.selectedId = id;
+    if (set.length > 1) cy.animate({ fit: { eles: set, padding: 60 } }, { duration: 450 });
+    toast((dir === "up" ? "Dependents" : "Dependencies") + ": " + (set.nodes().length - 1) + " nodes");
+  }
+
+  // Shortest dependency path between two nodes (shift-click), directed first.
+  function tracePathBetween(a, b) {
+    var cy = state.cy;
+    var na = cy.getElementById(a), nb = cy.getElementById(b);
+    if (na.empty() || nb.empty()) return;
+    var r = cy.elements().aStar({ root: na, goal: nb, directed: true });
+    if (!r.found) r = cy.elements().aStar({ root: na, goal: nb, directed: false });
+    if (!r.found) { toast("No path between these nodes in this view"); return; }
+    cy.elements().addClass("faded");
+    r.path.removeClass("faded");
+    r.path.nodes().addClass("highlight");
+    r.path.edges().addClass("highlight");
+    applyEdgeLabels();
+    cy.animate({ fit: { eles: r.path, padding: 70 } }, { duration: 450 });
+    toast("Path: " + r.path.nodes().length + " nodes");
   }
 
   function neighborGroup(title, ids, selfId, edgeTypeFn, isOut) {
@@ -1259,18 +1362,32 @@
 
     function close() { box.classList.remove("show"); box.innerHTML = ""; activeIdx = -1; }
 
+    // Which field matched the query — shown in the result row so a search by
+    // route / feature / package explains itself.
+    function matchHint(n, q) {
+      if (n.routePath && n.routePath.toLowerCase().indexOf(q) !== -1) return n.routePath;
+      if (n.feature && n.feature.toLowerCase().indexOf(q) !== -1) return "feat:" + n.feature;
+      if (n.package && n.package.toLowerCase().indexOf(q) !== -1) return n.package;
+      if (n.path && n.path.toLowerCase().indexOf(q) !== -1) return n.path.split("/").pop();
+      return n.package || "";
+    }
+
     function run() {
       var q = input.value.trim().toLowerCase();
       if (!q) { close(); return; }
       matches = state.data.nodes.filter(function (n) {
-        return n.label.toLowerCase().indexOf(q) !== -1 || (n.path && n.path.toLowerCase().indexOf(q) !== -1);
+        return (n.label && n.label.toLowerCase().indexOf(q) !== -1)
+          || (n.path && n.path.toLowerCase().indexOf(q) !== -1)
+          || (n.routePath && n.routePath.toLowerCase().indexOf(q) !== -1)
+          || (n.feature && n.feature.toLowerCase().indexOf(q) !== -1)
+          || (n.package && n.package.toLowerCase().indexOf(q) !== -1);
       }).slice(0, 12);
       if (!matches.length) { box.innerHTML = '<div class="sr-item" style="color:var(--ink-faint)">no matches</div>'; box.classList.add("show"); return; }
       box.innerHTML = matches.map(function (n, i) {
         return '<div class="sr-item' + (i === activeIdx ? ' active' : '') + '" data-id="' + esc(n.id) + '">' +
           '<span class="sr-kind">' + esc(n.kind) + '</span>' +
           '<span>' + esc(n.label) + '</span>' +
-          '<span class="sr-path">' + esc(n.package || "") + '</span>' +
+          '<span class="sr-path">' + esc(matchHint(n, q)) + '</span>' +
           '</div>';
       }).join("");
       box.classList.add("show");
@@ -1300,6 +1417,16 @@
     });
     document.addEventListener("click", function (e) {
       if (!e.target.closest(".search-wrap")) close();
+    });
+    // Global shortcut: "/" or Cmd/Ctrl-K focuses search (unless already typing).
+    document.addEventListener("keydown", function (e) {
+      var tag = (document.activeElement && document.activeElement.tagName) || "";
+      var typing = tag === "INPUT" || tag === "TEXTAREA";
+      if ((e.key === "/" && !typing) || ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey))) {
+        e.preventDefault();
+        input.focus();
+        input.select();
+      }
     });
   }
 
@@ -1454,6 +1581,11 @@
       state.cy.on("tap", "node", function (evt) {
         var n = evt.target;
         if (n.data("isParent")) return;
+        // Shift-click a second node → trace shortest path from the selected one.
+        if (evt.originalEvent && evt.originalEvent.shiftKey && state.selectedId && state.selectedId !== n.id()) {
+          tracePathBetween(state.selectedId, n.id());
+          return;
+        }
         highlightNode(n.id(), true);
       });
       state.cy.on("tap", function (evt) {
