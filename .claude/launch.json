@@ -1,0 +1,36 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "pagemapper",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "dist/cli.js",
+        "C:/Users/kin/Documents/GitHub/venio-mobile-app",
+        "--no-open",
+        "--watch",
+        "--port",
+        "4567",
+        "--catalog",
+        "http://localhost:4571",
+        "--catalog-build",
+        "C:/Users/kin/Documents/GitHub/venio-mobile-app/apps/preview_catalog",
+        "--app-url",
+        "http://localhost:4572"
+      ],
+      "port": 4567
+    },
+    {
+      "name": "harness-web",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["--yes", "http-server", "C:/Users/kin/Documents/GitHub/venio-mobile-app/apps/preview_catalog/build/web", "-p", "4571", "-c-1"],
+      "port": 4571
+    },
+    {
+      "name": "venioapp-web",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["--yes", "http-server", "C:/Users/kin/Documents/GitHub/venio-mobile-app/apps/venio_app/build/web", "-p", "4572", "-c-1"],
+      "port": 4572
+    }
+  ]
+}

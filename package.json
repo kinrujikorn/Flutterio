@@ -1,0 +1,27 @@
+{
+  "name": "pagemapper",
+  "version": "0.1.0",
+  "description": "Visualize how files and pages connect in a Flutter/Dart project as an interactive graph.",
+  "type": "module",
+  "bin": {
+    "pagemapper": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/cli.js",
+    "dev": "tsx src/cli.ts",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.0",
+    "open": "^10.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
