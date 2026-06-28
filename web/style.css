@@ -14,29 +14,29 @@
 @font-face { font-family: "Hanken Grotesk"; font-style: normal; font-weight: 800; font-display: swap; src: url("vendor/fonts/hanken-grotesk-latin-800-normal.woff2") format("woff2"); }
 
 :root {
-  /* ---- Surfaces — neutral charcoal, ChatGPT-dark tones, flat ---- */
-  --bg:          #171717;   /* app shell (darkest, like the CGPT sidebar) */
-  --canvas:      #212121;   /* graph area (the CGPT main tone) */
-  --surface:     #2a2a2c;   /* panels / cards */
-  --surface-2:   #303032;
-  --surface-3:   #3c3c40;
-  --line:        rgba(255, 255, 255, .09);
-  --line-strong: rgba(255, 255, 255, .16);
+  /* ---- Surfaces — deep teal-navy ladder (matches the roadmap palette) ---- */
+  --bg:          #0b1215;   /* app shell (darkest) */
+  --canvas:      #0f181b;   /* graph area */
+  --surface:     #152124;   /* panels / cards */
+  --surface-2:   #1b282c;
+  --surface-3:   #243338;
+  --line:        rgba(255, 255, 255, .08);
+  --line-strong: rgba(255, 255, 255, .15);
   /* top-edge highlight that sells "lifted glass" on dark cards */
   --hi:          inset 0 1px 0 rgba(255, 255, 255, .045);
 
   /* ---- Ink ---- */
-  --ink:         #ececec;
-  --ink-soft:    #b4b4b4;
-  --ink-faint:   #8e8e96;
+  --ink:         #e9f1f2;
+  --ink-soft:    #a2b3b6;
+  --ink-faint:   #6a7c80;
 
-  /* ---- Accent — OpenAI green, used sparingly; no glow ---- */
-  --accent:      #10a37f;
-  --accent-2:    #19c37d;
-  --accent-ink:  #ffffff;            /* text on solid accent */
-  --accent-soft: rgba(16, 163, 127, .14);
-  --accent-line: rgba(16, 163, 127, .42);
-  --accent-glow: rgba(16, 163, 127, .42);   /* premium ambient glow */
+  /* ---- Accent — bright mint-teal, used sparingly ---- */
+  --accent:      #2fe0a3;
+  --accent-2:    #15c98e;
+  --accent-ink:  #06231a;            /* dark text on the bright accent */
+  --accent-soft: rgba(47, 224, 163, .13);
+  --accent-line: rgba(47, 224, 163, .34);
+  --accent-glow: rgba(47, 224, 163, .40);   /* ambient glow */
 
   /* ---- Layer palette — soft, desaturated, neutral (no vivid purple) ---- */
   --layer-presentation: #8fb3dd;   /* soft blue (was purple) */
@@ -45,10 +45,10 @@
   --layer-other:        #989aa3;   /* neutral gray */
 
   /* ---- Edge palette ---- */
-  --edge-import:   #5e5e69;
-  --edge-navigate: #10a37f;
+  --edge-import:   #4e5a5e;
+  --edge-navigate: #2fe0a3;
   --edge-uses:     #c39ad2;
-  --edge-api:      #d68b98;
+  --edge-api:      #e0899a;
 
   /* ---- Severity palette (insights) — muted ---- */
   --sev-high:   #e06b7e;
@@ -56,9 +56,9 @@
   --sev-low:    #84a8d8;
 
   /* ---- Atmosphere — soft green ambient (luxury-AI, restrained) ---- */
-  --aurora-1: rgba(16, 163, 127, .055);
-  --aurora-2: rgba(120, 150, 190, .035);
-  --aurora-3: rgba(16, 163, 127, .030);
+  --aurora-1: rgba(47, 224, 163, .06);
+  --aurora-2: rgba(120, 160, 175, .03);
+  --aurora-3: rgba(47, 224, 163, .035);
 
   /* soft neutral shadows (flat-leaning) */
   --shadow-sm: 0 1px 2px rgba(0,0,0,.40), 0 2px 6px rgba(0,0,0,.28);
