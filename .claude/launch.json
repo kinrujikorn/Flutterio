@@ -6,7 +6,7 @@
       "runtimeExecutable": "node",
       "runtimeArgs": [
         "dist/cli.js",
-        "C:/Users/kin/Documents/GitHub/venio-mobile-app",
+        "C:/Users/RujikornRujitanont/Documents/GitHub/venio-mobile-app/apps/venio_app",
         "--no-open",
         "--watch",
         "--port",
@@ -14,7 +14,7 @@
         "--catalog",
         "http://localhost:4571",
         "--catalog-build",
-        "C:/Users/kin/Documents/GitHub/venio-mobile-app/apps/preview_catalog",
+        "C:/Users/RujikornRujitanont/Documents/GitHub/venio-mobile-app/apps/preview_catalog",
         "--app-url",
         "https://flutterio-preview.vercel.app"
       ],
@@ -23,13 +23,13 @@
     {
       "name": "harness-web",
       "runtimeExecutable": "npx",
-      "runtimeArgs": ["--yes", "http-server", "C:/Users/kin/Documents/GitHub/venio-mobile-app/apps/preview_catalog/build/web", "-p", "4571", "-c-1"],
+      "runtimeArgs": ["--yes", "http-server", "C:/Users/RujikornRujitanont/Documents/GitHub/venio-mobile-app/apps/preview_catalog/build/web", "-p", "4571", "-c-1"],
       "port": 4571
     },
     {
       "name": "venioapp-web",
       "runtimeExecutable": "npx",
-      "runtimeArgs": ["--yes", "http-server", "C:/Users/kin/Documents/GitHub/venio-mobile-app/apps/venio_app/build/web", "-p", "4572", "-c-1"],
+      "runtimeArgs": ["--yes", "http-server", "C:/Users/RujikornRujitanont/Documents/GitHub/venio-mobile-app/apps/venio_app/build/web", "-p", "4572", "-c-1"],
       "port": 4572
     }
   ]

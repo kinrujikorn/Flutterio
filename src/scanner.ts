@@ -8,11 +8,12 @@
 
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import type { Layer, PackageInfo, ScanResult, ScannedFile } from './types.js';
+import type { Layer, PackageInfo, ScanResult, ScannedFile, ScannedTestFile } from './types.js';
 
 /** Directory names that are never worth scanning for app source. */
 const SKIP_DIRS = new Set([
   '.git',
+  '.claude', // tooling config + git worktrees (duplicate source trees — never app code)
   '.dart_tool',
   'build',
   '.fvm',
@@ -25,9 +26,11 @@ const SKIP_DIRS = new Set([
   'web', // platform web folders (not the pagemapper web UI)
   '.idea',
   '.vscode',
-  'test', // skip test dirs by default
-  'integration_test',
 ]);
+
+/** Test directories: their .dart files are collected separately (for the
+ *  test-coverage overlay) and kept OUT of the graph's `files`. */
+const TEST_DIRS = new Set(['test', 'integration_test']);
 
 /** Convert an absolute path to a POSIX-style path relative to root. */
 function toRelPosix(root: string, abs: string): string {
@@ -118,11 +121,17 @@ function inferFeature(relPosix: string): string | undefined {
  * Walk the tree collecting absolute paths of .dart files and pubspec.yaml files.
  * Honors SKIP_DIRS, generated-file rules, and the .gitignore matcher.
  */
+interface WalkOut {
+  dartFiles: string[];
+  pubspecs: string[];
+  testDartFiles: string[];
+}
+
 async function walk(
   root: string,
   dir: string,
   ignore: GitignoreMatcher,
-  out: { dartFiles: string[]; pubspecs: string[] },
+  out: WalkOut,
 ): Promise<void> {
   let entries: import('node:fs').Dirent[];
   try {
@@ -136,6 +145,11 @@ async function walk(
     const rel = toRelPosix(root, abs);
 
     if (entry.isDirectory()) {
+      if (TEST_DIRS.has(entry.name)) {
+        if (ignore.matches(rel)) continue;
+        await walkTests(root, abs, ignore, out);
+        continue;
+      }
       if (SKIP_DIRS.has(entry.name)) continue;
       if (ignore.matches(rel)) continue;
       await walk(root, abs, ignore, out);
@@ -148,6 +162,36 @@ async function walk(
       if (isGeneratedDart(entry.name)) continue;
       if (ignore.matches(rel)) continue;
       out.dartFiles.push(abs);
+    }
+  }
+}
+
+/** Collect .dart files under a test/ or integration_test/ subtree into
+ *  `out.testDartFiles` (never into the graph). */
+async function walkTests(
+  root: string,
+  dir: string,
+  ignore: GitignoreMatcher,
+  out: WalkOut,
+): Promise<void> {
+  let entries: import('node:fs').Dirent[];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const abs = path.join(dir, entry.name);
+    const rel = toRelPosix(root, abs);
+    if (entry.isDirectory()) {
+      if (SKIP_DIRS.has(entry.name)) continue;
+      if (ignore.matches(rel)) continue;
+      await walkTests(root, abs, ignore, out);
+    } else if (entry.isFile()) {
+      if (!entry.name.endsWith('.dart')) continue;
+      if (isGeneratedDart(entry.name)) continue;
+      if (ignore.matches(rel)) continue;
+      out.testDartFiles.push(abs);
     }
   }
 }
@@ -172,7 +216,7 @@ export async function scanProject(projectRoot: string): Promise<ScanResult> {
   const root = path.resolve(projectRoot);
   const ignore = await loadGitignore(root);
 
-  const collected = { dartFiles: [] as string[], pubspecs: [] as string[] };
+  const collected: WalkOut = { dartFiles: [], pubspecs: [], testDartFiles: [] };
   await walk(root, root, ignore, collected);
 
   // Resolve packages from pubspecs.
@@ -199,5 +243,10 @@ export async function scanProject(projectRoot: string): Promise<ScanResult> {
     })
     .sort((a, b) => a.relPath.localeCompare(b.relPath));
 
-  return { projectRoot: root, packages, files };
+  // Test files: kept separate from the graph, used by the coverage overlay.
+  const testFiles: ScannedTestFile[] = collected.testDartFiles
+    .map((absPath) => ({ absPath, relPath: toRelPosix(root, absPath) }))
+    .sort((a, b) => a.relPath.localeCompare(b.relPath));
+
+  return { projectRoot: root, packages, files, testFiles };
 }

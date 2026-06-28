@@ -15,6 +15,7 @@ import type {
   GraphData,
   GraphEdge,
   GraphNode,
+  InsightInputs,
   ParseResult,
   ScanResult,
 } from './types.js';
@@ -31,7 +32,11 @@ function fileLabel(relPath: string): string {
   return i === -1 ? relPath : relPath.slice(i + 1);
 }
 
-export function buildGraph(scan: ScanResult, parse: ParseResult): GraphData {
+export function buildGraph(
+  scan: ScanResult,
+  parse: ParseResult,
+  inputs: InsightInputs = {},
+): GraphData {
   const nodes: GraphNode[] = [];
   const nodeIds = new Set<string>();
 
@@ -171,6 +176,19 @@ export function buildGraph(scan: ScanResult, parse: ParseResult): GraphData {
     stats[key] = (stats[key] ?? 0) + 1;
   }
 
+  // --- History/coverage overlays on nodes (keyed by file relPath == node.path) ---
+  if (inputs.git?.churn?.length) {
+    const churnByRel = new Map(inputs.git.churn.map((c) => [c.relPath, c.commits]));
+    for (const n of nodes) {
+      const c = churnByRel.get(n.path);
+      if (c !== undefined) n.churn = c;
+    }
+  }
+  if (inputs.coveredRel && inputs.coveredRel.length) {
+    const covered = new Set(inputs.coveredRel);
+    for (const n of nodes) n.tested = covered.has(n.path);
+  }
+
   const graph: GraphData = {
     projectRoot: scan.projectRoot,
     generatedAt: new Date().toISOString(),
@@ -179,7 +197,7 @@ export function buildGraph(scan: ScanResult, parse: ParseResult): GraphData {
     edges,
     stats,
   };
-  graph.insights = computeInsights(graph);
+  graph.insights = computeInsights(graph, inputs);
   stats.insights = graph.insights.summary.total;
   graph.coupling = computePackageCoupling(graph);
   return graph;

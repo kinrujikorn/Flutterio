@@ -45,7 +45,11 @@
     "god-file": "file",
     "dead-page": "page",
     "orphan-file": "file",
-    "nav-depth": "page"
+    "nav-depth": "page",
+    "hotspot": "file",
+    "temporal-coupling": "file",
+    "policy-violation": "file",
+    "untested-page": "page"
   };
   var SEVERITY_RANK = { high: 0, medium: 1, low: 2 };
 
@@ -65,6 +69,7 @@
     showIsolated: false,
     swimlanes: false,    // arrange nodes into horizontal bands by architectural layer
     swimBands: null,     // [{layer, yTop, yBottom}] for the band-label overlay
+    churnOverlay: false, // size + heat-tint file nodes by git churn (hotspots)
     collapsedPackages: new Set(), // packages folded into a single supernode (flat view only)
     layoutCache: {},   // (view|group|iso|focus) -> {nodeId:{x,y}} so view switches don't re-layout
     focusSubgraph: null, // { id, hops } — restrict the graph to a node's k-hop neighborhood
@@ -281,6 +286,7 @@
           pkg: n.package || "",
           feature: n.feature || "",
           route: n.routePath || "",
+          churn: n.churn || 0,
           parent: parentId
         }
       });
@@ -831,8 +837,48 @@
       var d = n.degree(false);
       n.data("degree", d);
       var sz = 24 + Math.round((58 - 24) * Math.sqrt(d / maxDeg));
-      n.style({ width: sz, height: sz });
+      n.style({ width: sz, height: sz, "underlay-color": "", "underlay-opacity": "", "border-color": "", "border-opacity": "" });
     });
+  }
+
+  // True when the loaded graph carries git churn (the hotspot overlay is usable).
+  function hasChurn() {
+    return !!(state.data && state.data.nodes && state.data.nodes.some(function (n) { return n.churn; }));
+  }
+
+  // Size + heat-tint file nodes by git churn: bigger + redder = changed more
+  // often. Pairs with the "Hotspots" insight (churn × coupling).
+  function sizeNodesByChurn() {
+    var cy = state.cy;
+    if (!cy) return;
+    var files = cy.nodes('[kind = "file"]');
+    var maxCh = 1;
+    files.forEach(function (n) { var c = n.data("churn") || 0; if (c > maxCh) maxCh = c; });
+    files.forEach(function (n) {
+      // Keep degree data fresh so applyNodeLOD's label logic still works in churn mode.
+      n.data("degree", n.degree(false));
+      var c = n.data("churn") || 0;
+      if (c > 0) {
+        var t = c / maxCh; // 0..1
+        var sz = 22 + Math.round((62 - 22) * Math.sqrt(t));
+        n.style({
+          width: sz, height: sz,
+          "underlay-color": "#ff6b35",
+          "underlay-opacity": 0.10 + 0.4 * t,
+          "border-color": "#ff6b35",
+          "border-opacity": 0.45 + 0.5 * t
+        });
+      } else {
+        // No churn → small + muted so hotspots stand out (clear any prior tint).
+        n.style({ width: 20, height: 20, "underlay-color": "", "underlay-opacity": 0.04, "border-color": "", "border-opacity": 0.4 });
+      }
+    });
+  }
+
+  // Dispatch node sizing: churn overlay when on + available, else by degree.
+  function sizeNodes() {
+    if (state.churnOverlay && hasChurn()) sizeNodesByChurn();
+    else sizeNodesByDegree();
   }
 
   function render(relayout, animateLayout) {
@@ -842,7 +888,7 @@
     cy.elements().remove();
     cy.add(els);
     cy.endBatch();
-    sizeNodesByDegree();
+    sizeNodes();
 
     renderEmptyState();
     renderActiveFilters();
@@ -920,7 +966,7 @@
     cy.elements().remove();
     cy.add(els);
     cy.endBatch();
-    sizeNodesByDegree();
+    sizeNodes();
 
     renderEmptyState();
     renderActiveFilters();
@@ -1323,18 +1369,24 @@
       var savedPan = { x: cy.pan().x, y: cy.pan().y };
 
       state.data = newData;
+      state._impAdj = null;     // import adjacency cache — graph changed
+      state._nodeById = null;   // node lookup cache — graph changed
+      state._pageFiles = null;  // page-declaring-file cache — graph changed
       renderHeader();
       pruneFilters();
       renderFilters();
       renderInsights();
       renderCoupling();
+      // Git churn may appear after a background LSP refine — reveal the toggle.
+      var churnRowLR = document.getElementById("churn-row");
+      if (churnRowLR) churnRowLR.hidden = !hasChurn();
 
       var els = buildElements();
       cy.startBatch();
       cy.elements().remove();
       cy.add(els);
       cy.endBatch();
-      sizeNodesByDegree();
+      sizeNodes();
 
       renderEmptyState();
       var descEl = document.getElementById("view-desc");
@@ -1690,6 +1742,11 @@
     var cy = state.cy;
     var node = cy.getElementById(id);
 
+    // Impact / blast radius over the full import graph. For a page node, the
+    // code lives in its declaring file, so measure impact on that file id.
+    var impactId = (n.kind === "page") ? n.path : id;
+    var imp = (id.indexOf("svc:") !== 0) ? computeImpact(impactId) : null;
+
     // neighbors within current view
     var outgoing = node.outgoers("node").map(function (x) { return x.id(); });
     var incoming = node.incomers("node").map(function (x) { return x.id(); });
@@ -1744,6 +1801,19 @@
           '<div class="trace-hint">Shift-click another node for the shortest path · ' +
             (state.focusSubgraph ? '<b>Focused</b> — press Clear to exit.' : 'Focus isolates a node’s neighborhood.') + '</div>'
         : '') +
+      (imp
+        ? '<div class="impact-box">' +
+            '<div class="impact-head">Impact · blast radius</div>' +
+            '<div class="impact-grid">' +
+              '<div class="impact-cell hot"><span class="impact-num">' + imp.dependents.length + '</span><span class="impact-lbl">dependents</span></div>' +
+              '<div class="impact-cell"><span class="impact-num">' + imp.dependencies.length + '</span><span class="impact-lbl">depends on</span></div>' +
+              '<div class="impact-cell"><span class="impact-num">' + imp.features + '</span><span class="impact-lbl">features hit</span></div>' +
+              '<div class="impact-cell"><span class="impact-num">' + imp.pages + '</span><span class="impact-lbl">pages hit</span></div>' +
+            '</div>' +
+            '<div class="impact-sub">transitive over the full import graph · ' + imp.direct + ' direct dependent' + (imp.direct === 1 ? '' : 's') + '</div>' +
+            (imp.dependents.length ? '<button class="impact-btn" id="impact-hl">Highlight blast radius</button>' : '') +
+          '</div>'
+        : '') +
       '<dl class="meta-grid">' + rows.join("") + '</dl>' +
       neighborGroup("Outgoing", outgoing, id, edgeTypeBetween, true) +
       neighborGroup("Incoming", incoming, id, edgeTypeBetween, false);
@@ -1779,6 +1849,12 @@
     Array.prototype.forEach.call(body.querySelectorAll(".trace-btn"), function (el) {
       el.addEventListener("click", function () { tracePath(id, el.getAttribute("data-dir")); });
     });
+    var impactBtn = document.getElementById("impact-hl");
+    // Recompute on click (not the captured `imp`) so it's correct even after a
+    // live-reload rebuilt the graph while this panel stayed open.
+    if (impactBtn) impactBtn.addEventListener("click", function () {
+      highlightBlastRadius(impactId, computeImpact(impactId).dependents);
+    });
     var focusBtn = document.getElementById("focus-sub");
     if (focusBtn) focusBtn.addEventListener("click", function () {
       state.focusSubgraph = { id: id, hops: 2 };
@@ -1795,6 +1871,104 @@
       syncUrl();
       announce("Collapsed package " + n.package + " · click the supernode to expand");
     });
+  }
+
+  // ---- Impact / blast radius (full import graph, ignores view & filters) ----
+  // Forward + reverse import adjacency over the WHOLE graph, cached. Unlike the
+  // in-view "Dependents/Dependencies" trace, this answers the real question:
+  // "if I change this file, everything that could be affected — across all
+  // features/pages — regardless of what's currently on screen."
+  function importAdjacency() {
+    if (state._impAdj) return state._impAdj;
+    var fwd = {}, rev = {};
+    (state.data.edges || []).forEach(function (e) {
+      if (e.type !== "import") return;
+      (fwd[e.source] || (fwd[e.source] = [])).push(e.target);
+      (rev[e.target] || (rev[e.target] = [])).push(e.source);
+    });
+    state._impAdj = { fwd: fwd, rev: rev };
+    return state._impAdj;
+  }
+
+  function nodeByIdMap() {
+    if (state._nodeById) return state._nodeById;
+    var m = {};
+    state.data.nodes.forEach(function (n) { m[n.id] = n; });
+    state._nodeById = m;
+    return m;
+  }
+
+  // BFS transitive closure from startId over the given adjacency (excludes self).
+  function importClosure(startId, adj) {
+    var seen = {}, queue = [startId], head = 0;
+    while (head < queue.length) {
+      var v = queue[head++];
+      var ns = adj[v] || [];
+      for (var i = 0; i < ns.length; i++) {
+        var w = ns[i];
+        if (!seen[w] && w !== startId) { seen[w] = true; queue.push(w); }
+      }
+    }
+    return Object.keys(seen);
+  }
+
+  // Files that declare a page (import edges target files, not page nodes, so to
+  // count "pages affected" we look for dependents that are page-declaring files).
+  function pageFileSet() {
+    if (state._pageFiles) return state._pageFiles;
+    var s = {};
+    // Count pages per declaring file — one file can declare several page classes.
+    state.data.nodes.forEach(function (n) { if (n.kind === "page" && n.path) s[n.path] = (s[n.path] || 0) + 1; });
+    state._pageFiles = s;
+    return s;
+  }
+
+  function computeImpact(id) {
+    var adj = importAdjacency();
+    var dependents = importClosure(id, adj.rev);   // who transitively imports id
+    var dependencies = importClosure(id, adj.fwd); // what id transitively imports
+    var direct = (adj.rev[id] || []).filter(function (x) { return x !== id; }).length;
+    var byId = nodeByIdMap();
+    var pf = pageFileSet();
+    var feats = {}, pages = 0;
+    dependents.forEach(function (nid) {
+      var nn = byId[nid];
+      if (nn && nn.feature) feats[nn.feature] = 1;
+      if (pf[nid]) pages += pf[nid]; // pages declared by this dependent file
+    });
+    return {
+      dependents: dependents, dependencies: dependencies,
+      direct: direct, features: Object.keys(feats).length, pages: pages
+    };
+  }
+
+  // Light up a node + its full reverse-import closure (the blast radius) in the
+  // File Dependency view, regardless of current filters.
+  function highlightBlastRadius(id, dependents) {
+    closeDrawer();
+    state.focusInsight = null;
+    clearInsightActive();
+    if (state.view !== "file") switchView("file"); else render(true);
+    var cy = state.cy;
+    if (!cy) return;
+    var sel = cy.collection();
+    var self = cy.getElementById(id);
+    if (self.nonempty()) sel = sel.union(self);
+    dependents.forEach(function (nid) { var nn = cy.getElementById(nid); if (nn.nonempty()) sel = sel.union(nn); });
+    if (!dependents.length) { toast("Nothing depends on this file."); return; }
+    // dependents exist but none are on screen (all filtered out) → sel is just self.
+    if (sel.empty() || sel.length <= 1) {
+      toast("Blast-radius nodes are filtered out — clear filters to see them.");
+      return;
+    }
+    cy.elements().addClass("faded");
+    sel.removeClass("faded").addClass("highlight");
+    sel.edgesWith(sel).removeClass("faded").addClass("highlight");
+    self.removeClass("highlight").addClass("focus");
+    applyEdgeLabels();
+    state.selectedId = id;
+    cy.animate({ fit: { eles: sel, padding: 60 } }, { duration: 450 });
+    toast("Blast radius: " + dependents.length + " dependent file" + (dependents.length === 1 ? "" : "s"));
   }
 
   // Trace the transitive reach of a node (within the current view): predecessors
@@ -2176,6 +2350,11 @@
       render(true);
       syncUrl();
     });
+    var churnToggle = document.getElementById("toggle-churn");
+    if (churnToggle) churnToggle.addEventListener("change", function (e) {
+      state.churnOverlay = e.target.checked;
+      sizeNodes(); // re-size/tint only — no relayout needed
+    });
 
     // theme toggle (persisted). Dark is the default; light is opt-in.
     var saved = null;
@@ -2245,6 +2424,11 @@
       if (ti) ti.checked = state.showIsolated;
       var ts = document.getElementById("toggle-swimlanes");
       if (ts) ts.checked = state.swimlanes;
+      // The churn/hotspot overlay is only meaningful when git history is present.
+      var churnRow = document.getElementById("churn-row");
+      if (churnRow) churnRow.hidden = !hasChurn();
+      var tcInit = document.getElementById("toggle-churn");
+      if (tcInit) tcInit.checked = state.churnOverlay;
 
       state.cy = window.cytoscape({
         container: document.getElementById("cy"),

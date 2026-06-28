@@ -16,15 +16,19 @@
 // standalone HTML all get it for free from one graph fetch.
 
 import type {
+  ChurnInfo,
+  CoChangePair,
   GraphData,
   GraphEdge,
   GraphNode,
   Insight,
   InsightCategory,
+  InsightInputs,
   InsightsReport,
   Layer,
   PackageCoupling,
 } from './types.js';
+import { evaluatePolicy } from './policy.js';
 
 /** Clean-architecture rank: a file may depend on the same or a *lower* rank.
  *  Depending on a higher rank (e.g. domain → presentation) is a violation. */
@@ -455,10 +459,144 @@ export function computePackageCoupling(graph: GraphData): PackageCoupling[] {
   return rows;
 }
 
-/** Compute the full insights report from a built graph. */
-export function computeInsights(graph: GraphData): InsightsReport {
+/** Mean + k·σ over a numeric sample (with a floor) — the outlier threshold
+ *  shared by the god-file and hotspot checks. */
+function outlierThreshold(values: number[], k: number, floor: number): number {
+  if (!values.length) return floor;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const variance = values.reduce((a, b) => a + (b - mean) * (b - mean), 0) / values.length;
+  return Math.max(floor, mean + k * Math.sqrt(variance));
+}
+
+/** Hotspots — files that are BOTH frequently changed (git churn) AND heavily
+ *  depended on (import fan-in). The CodeScene-style refactor-priority signal:
+ *  change-prone code that everything relies on is where risk concentrates.
+ *  Needs git history; a no-op without it. */
+function computeHotspots(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  churn: ChurnInfo[] | undefined,
+): Insight[] {
+  if (!churn || !churn.length) return [];
+  const churnByRel = new Map(churn.map((c) => [c.relPath, c]));
+  const inDeg = new Map<string, number>();
+  for (const e of edges) {
+    if (e.type !== 'import') continue;
+    inDeg.set(e.target, (inDeg.get(e.target) ?? 0) + 1);
+  }
+  const fileNodes = nodes.filter((n) => n.kind === 'file' && !n.path.startsWith('('));
+  const churnVals = fileNodes.map((n) => churnByRel.get(n.path)?.commits ?? 0).filter((v) => v > 0);
+  const finVals = fileNodes.map((n) => inDeg.get(n.id) ?? 0).filter((v) => v > 0);
+  if (!churnVals.length || !finVals.length) return [];
+  const churnT = outlierThreshold(churnVals, 1, 5);
+  const finT = outlierThreshold(finVals, 1, 3);
+
+  const items: Insight[] = [];
+  const scoreById = new Map<string, number>(); // node id -> churn × fan-in
+  for (const n of fileNodes) {
+    const ch = churnByRel.get(n.path)?.commits ?? 0;
+    const fin = inDeg.get(n.id) ?? 0;
+    if (ch < churnT || fin < finT) continue;
+    const authors = churnByRel.get(n.path)?.authors ?? 0;
+    const hubEdges = edges
+      .filter((e) => e.type === 'import' && e.target === n.id)
+      .map((e) => e.id);
+    scoreById.set(n.id, ch * fin);
+    items.push({
+      id: `hotspot:${n.id}`,
+      severity: ch >= churnT * 1.6 && fin >= finT * 1.6 ? 'high' : 'medium',
+      title: `${n.label} (${ch} commits · ${fin}↓)`,
+      detail: `${shortPath(n.path)} changed in ${ch} commits${
+        authors ? ` by ${authors} author${authors === 1 ? '' : 's'}` : ''
+      } and is imported by ${fin} files. Frequently-changed code that many files depend on is a hotspot — the highest-leverage place to refactor or add tests.`,
+      nodes: [n.id],
+      edges: hubEdges,
+    });
+  }
+  // Rank by churn × fan-in (the hotspot "area"), tie-break by id for stability.
+  items.sort(
+    (a, b) =>
+      (scoreById.get(b.nodes[0]) ?? 0) - (scoreById.get(a.nodes[0]) ?? 0) ||
+      a.nodes[0].localeCompare(b.nodes[0]),
+  );
+  return items;
+}
+
+/** Temporal coupling — file pairs that change together across commits but have
+ *  NO import edge between them. A hidden dependency the static import graph can't
+ *  see (shared implicit contract, parallel hierarchies, copy-paste drift).
+ *  Needs git history; a no-op without it. */
+function computeTemporalCoupling(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  byId: Map<string, GraphNode>,
+  coChange: CoChangePair[] | undefined,
+): Insight[] {
+  if (!coChange || !coChange.length) return [];
+  const fileNodeIds = new Set(nodes.filter((n) => n.kind === 'file').map((n) => n.id)); // id === relPath
+  const importPair = new Set<string>();
+  for (const e of edges) {
+    if (e.type === 'import') importPair.add(e.source + '|' + e.target);
+  }
+  const hasImport = (a: string, b: string): boolean =>
+    importPair.has(a + '|' + b) || importPair.has(b + '|' + a);
+
+  const items: Insight[] = [];
+  for (const p of coChange) {
+    if (items.length >= 40) break; // cap noise
+    if (!fileNodeIds.has(p.a) || !fileNodeIds.has(p.b)) continue;
+    if (p.support < 0.5) continue;
+    if (hasImport(p.a, p.b)) continue;
+    const na = byId.get(p.a);
+    const nb = byId.get(p.b);
+    items.push({
+      id: `cochange:${p.a}::${p.b}`,
+      severity: p.support >= 0.7 ? 'medium' : 'low',
+      title: `${na?.label ?? p.a} ↔ ${nb?.label ?? p.b}`,
+      detail: `${shortPath(p.a)} and ${shortPath(p.b)} changed together in ${p.together} commits (${Math.round(
+        p.support * 100,
+      )}% co-change) yet neither imports the other — a hidden coupling. Changes to one likely require the other.`,
+      nodes: [p.a, p.b],
+    });
+  }
+  return items;
+}
+
+/** Untested pages — page classes whose declaring file no test imports. Only
+ *  runs when at least one test was resolved (coveredRel non-empty); a project
+ *  with zero tests is a different problem and would flag every page. */
+function computeUntestedPages(
+  nodes: GraphNode[],
+  coveredRel: string[] | undefined,
+): Insight[] {
+  if (!coveredRel || !coveredRel.length) return [];
+  const covered = new Set(coveredRel);
+  const items: Insight[] = [];
+  for (const n of nodes) {
+    if (n.kind !== 'page') continue;
+    if (covered.has(n.path)) continue;
+    items.push({
+      id: `untested:${n.id}`,
+      severity: 'low',
+      title: n.label,
+      detail: `No test file imports ${n.label}${
+        n.routePath ? ` (${n.routePath})` : ''
+      } (declared in ${shortPath(n.path)}) — it appears to have no test coverage.`,
+      nodes: [n.id],
+    });
+  }
+  items.sort((a, b) => a.title.localeCompare(b.title));
+  return items;
+}
+
+/** Compute the full insights report from a built graph. `inputs` carries the
+ *  optional history/config-derived data that enables the extended categories;
+ *  omit it and only the pure graph-derived categories run. */
+export function computeInsights(graph: GraphData, inputs: InsightInputs = {}): InsightsReport {
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const { nodes, edges } = graph;
+  const churn = inputs.git?.churn;
+  const coChange = inputs.git?.coChange;
 
   const categories: InsightCategory[] = [
     {
@@ -476,6 +614,13 @@ export function computeInsights(graph: GraphData): InsightsReport {
       items: computeCrossFeatureImports(edges, byId),
     },
     {
+      key: 'policy-violation',
+      label: 'Policy violations',
+      description:
+        'Forbidden dependencies declared in .pagemapper.json — custom per-project architecture rules.',
+      items: inputs.policy ? evaluatePolicy(graph, inputs.policy) : [],
+    },
+    {
       key: 'circular-dep',
       label: 'Circular dependencies',
       description: 'Groups of files that import each other in a cycle.',
@@ -489,10 +634,23 @@ export function computeInsights(graph: GraphData): InsightsReport {
       items: computeGodFiles(nodes, edges),
     },
     {
+      key: 'hotspot',
+      label: 'Hotspots (churn × coupling)',
+      description:
+        'Files changed often in git AND depended on by many — the highest-leverage refactor/test targets.',
+      items: computeHotspots(nodes, edges, churn),
+    },
+    {
       key: 'dead-page',
       label: 'Unreachable pages',
       description: 'Page classes with no incoming navigation or widget usage.',
       items: computeDeadPages(nodes, edges),
+    },
+    {
+      key: 'untested-page',
+      label: 'Untested pages',
+      description: 'Page classes that no test file imports — likely missing test coverage.',
+      items: computeUntestedPages(nodes, inputs.coveredRel),
     },
     {
       key: 'nav-depth',
@@ -506,6 +664,13 @@ export function computeInsights(graph: GraphData): InsightsReport {
       label: 'Orphan files',
       description: 'Files with no imports in or out — possible dead code.',
       items: computeOrphanFiles(nodes, edges),
+    },
+    {
+      key: 'temporal-coupling',
+      label: 'Temporal coupling',
+      description:
+        'File pairs that change together in git history but have no import edge — a hidden dependency.',
+      items: computeTemporalCoupling(nodes, edges, byId, coChange),
     },
   ];
 

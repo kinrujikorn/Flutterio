@@ -657,6 +657,33 @@ kbd {
 .trace-hint b { color: var(--accent); font-weight: 700; }
 .code-btn svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
+/* Impact / blast-radius panel */
+.impact-box {
+  margin: 0 0 16px; padding: 10px 11px 11px; border-radius: 10px;
+  background: var(--surface-2); border: 1px solid var(--line);
+}
+.impact-head {
+  font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--ink-soft); margin-bottom: 8px;
+}
+.impact-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.impact-cell {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 7px 2px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line);
+}
+.impact-cell.hot { border-color: color-mix(in srgb, #ff6b35 45%, transparent); background: color-mix(in srgb, #ff6b35 10%, var(--surface)); }
+.impact-num { font-size: 16px; font-weight: 800; color: var(--ink); line-height: 1; }
+.impact-cell.hot .impact-num { color: #ff6b35; }
+.impact-lbl { font-size: 9px; color: var(--ink-faint); text-align: center; letter-spacing: .01em; }
+.impact-sub { font-size: 10px; color: var(--ink-faint); margin: 8px 0 0; }
+.impact-btn {
+  display: block; width: 100%; margin-top: 9px; padding: 7px 10px; border-radius: 8px; cursor: pointer;
+  font: inherit; font-size: 11.5px; font-weight: 600; color: var(--accent);
+  background: var(--accent-soft); border: 1px solid var(--accent-line);
+}
+.impact-btn:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--accent); }
+.impact-btn:active { transform: scale(.99); }
+
 /* Source code viewer modal */
 #code-modal {
   position: fixed; inset: 0; z-index: 120; display: grid; place-items: center;

@@ -28,11 +28,21 @@ export interface ScannedFile {
   layer: Layer;
 }
 
+/** A discovered test file (under test/ or integration_test/). Kept separate
+ *  from `files` so it never pollutes the graph, but available for the
+ *  test-coverage overlay (which files do tests reference?). */
+export interface ScannedTestFile {
+  absPath: string;
+  relPath: string;
+}
+
 /** Result of scanning a project: file list + package map + root. */
 export interface ScanResult {
   projectRoot: string;
   packages: PackageInfo[];
   files: ScannedFile[];
+  /** Test files found under test/ / integration_test/ (not part of the graph). */
+  testFiles?: ScannedTestFile[];
 }
 
 // ---- Parser outputs -------------------------------------------------------
@@ -117,6 +127,12 @@ export interface GraphNode {
   feature?: string;
   layer?: Layer;
   routePath?: string;
+  /** Git commits that touched this file in the analyzed window (churn/hotspot
+   *  overlay). Absent when git history isn't available. */
+  churn?: number;
+  /** True when at least one test file references this file/page. Absent when
+   *  the test-coverage pass didn't run. */
+  tested?: boolean;
 }
 
 export interface GraphEdge {
@@ -136,7 +152,11 @@ export type InsightKey =
   | 'god-file'
   | 'dead-page'
   | 'nav-depth'
-  | 'orphan-file';
+  | 'orphan-file'
+  | 'hotspot'
+  | 'temporal-coupling'
+  | 'policy-violation'
+  | 'untested-page';
 
 export type Severity = 'high' | 'medium' | 'low';
 
@@ -195,4 +215,103 @@ export interface GraphData {
   insights?: InsightsReport;
   /** Per-package coupling/instability metrics. */
   coupling?: PackageCoupling[];
+}
+
+// ---- Git history overlay (churn + temporal coupling) ----------------------
+
+/** Per-file change frequency mined from `git log`. */
+export interface ChurnInfo {
+  /** Project-relative POSIX path. */
+  relPath: string;
+  /** Number of commits that touched this file within the window. */
+  commits: number;
+  /** Distinct author count. */
+  authors: number;
+  /** ISO date of the most recent commit touching it, if known. */
+  lastChange?: string;
+}
+
+/** A pair of files that changed together across commits — implicit (temporal)
+ *  coupling. Surfaced as a finding when the pair has NO import edge between
+ *  them: a hidden dependency static analysis can't see. */
+export interface CoChangePair {
+  /** relPath of one file (sorted ascending so a<b for stable ids). */
+  a: string;
+  /** relPath of the other file. */
+  b: string;
+  /** Commits in which both files changed. */
+  together: number;
+  /** Co-change support: together / (commits touching either), 0..1. */
+  support: number;
+}
+
+/** Output of the git-history mining pass (src/git.ts). */
+export interface GitInsightData {
+  churn: ChurnInfo[];
+  coChange: CoChangePair[];
+  /** Commits inspected (for thresholds + display). */
+  commitsScanned: number;
+}
+
+// ---- Architecture policy (.pagemapper.json) -------------------------------
+
+/** One forbidden-dependency rule. `from`/`to` are selectors matched against a
+ *  node — see src/policy.ts for the selector grammar (package:/feature:/layer:/
+ *  path:/glob). An import whose source matches `from` and target matches `to`
+ *  is a violation. */
+export interface PolicyRule {
+  /** Optional human label shown in the finding. */
+  name?: string;
+  from: string;
+  to: string;
+  /** Severity for violations. Default 'high'. */
+  severity?: Severity;
+}
+
+/** Project policy loaded from `.pagemapper.json`. */
+export interface PolicyConfig {
+  /** Forbidden cross-module dependencies. */
+  forbidden?: PolicyRule[];
+}
+
+// ---- Extra inputs to the insight engine -----------------------------------
+
+/** Optional, history/config-derived inputs that enable the extended insight
+ *  categories. All optional — when omitted, only the pure graph-derived
+ *  categories run (fully backward compatible). */
+export interface InsightInputs {
+  /** Git churn + co-change, from src/git.ts. Enables hotspot + temporal-coupling. */
+  git?: GitInsightData;
+  /** relPaths referenced by test files, from src/coverage.ts. Enables untested-page. */
+  coveredRel?: string[];
+  /** Architecture policy, from src/policy.ts. Enables policy-violation. */
+  policy?: PolicyConfig;
+}
+
+// ---- Graph diff (baseline comparison) -------------------------------------
+
+/** A reference to one finding, for the diff's added/removed lists. */
+export interface DiffInsightRef {
+  category: string;
+  id: string;
+  title: string;
+  severity: Severity;
+}
+
+/** Structural + insight delta between a baseline graph and the current one. */
+export interface GraphDiff {
+  baselineAt?: string;
+  currentAt: string;
+  /** Node ids added / removed. */
+  nodes: { added: string[]; removed: string[] };
+  /** Edge ids added / removed. */
+  edges: { added: string[]; removed: string[] };
+  insights: {
+    /** Findings present now but not in the baseline (regressions). */
+    added: DiffInsightRef[];
+    /** Findings in the baseline but gone now (fixes). */
+    removed: DiffInsightRef[];
+    /** Per-category {added, removed}, plus a `total` key. */
+    summary: Record<string, { added: number; removed: number }>;
+  };
 }

@@ -60,6 +60,13 @@ In **Page Flow**, edge labels even show the route and the data passed along, e.g
 - **Click a node** → a panel opens with its path, package, layer, and clickable
   neighbors (what it points to / what points to it). Its connections light up; the
   rest dims.
+- **Impact / blast radius** → the same panel shows how far a change ripples: how
+  many files depend on it (transitively, across the *whole* graph — not just
+  what's on screen), how many features and pages it touches, and a one-click
+  **Highlight blast radius**. The answer to *"what breaks if I change this?"*
+- **Hotspots** → the *Hotspots (size by churn)* toggle (left, shown when git
+  history is available) sizes and red-tints files by how often they change —
+  big & red = changed a lot.
 - **Search** (top bar) → jump to any file or page by name.
 - **Filters** (left) → narrow to specific packages or features. *Group by package*
   bundles a big monorepo into tidy clusters.
@@ -79,11 +86,15 @@ involved.
 |---------|---------------|
 | **Layer violations** | a core layer importing an outer one (e.g. `domain → data`) — breaks clean architecture |
 | **Cross-feature deep imports** | a feature reaching into another feature's `src/` internals instead of its public API |
+| **Policy violations** | a forbidden dependency you declared in `.pagemapper.json` (your own rules) |
 | **Circular dependencies** | files that import each other in a loop |
 | **God files** | files that far too many things depend on (or that depend on far too much) |
+| **Hotspots** | files that change *often* in git **and** are depended on by many — the highest-leverage place to refactor or add tests |
 | **Unreachable pages** | screens nothing navigates to — possibly dead |
+| **Untested pages** | screens no test file imports — likely missing coverage |
 | **Deep pages** | screens buried many taps from the entry |
 | **Orphan files** | files with no imports in or out — possible dead code |
+| **Temporal coupling** | file pairs that keep changing together in git but don't import each other — a *hidden* dependency |
 
 Below it, the **Coupling** dashboard rates each package's *Instability* (how much
 it depends outward vs. how much depends on it) and flags the "watch zone" —
@@ -155,6 +166,24 @@ node dist/cli.js <project> --no-open --check --max-high 0
 It prints a per-category report and exits non-zero when a threshold is crossed.
 Thresholds: `--max-high <n>` (default 0), `--max-total <n>` (default unlimited).
 
+**Gate on *new* problems only.** A big existing codebase already has findings —
+blocking on all of them is a non-starter. Snapshot a baseline once, then fail CI
+only when a PR *adds* new findings:
+
+```bash
+# once, on main:
+node dist/cli.js <project> --no-open --json pagemapper-baseline.json
+# on every PR — fails only if the PR introduces NEW high-severity findings:
+node dist/cli.js <project> --no-open --check --baseline pagemapper-baseline.json --max-high 0
+```
+
+`--diff out.json --baseline base.json` writes the full added/removed delta
+(nodes, edges, findings) for dashboards or PR comments.
+
+> Insights now include **git-derived** signals (hotspots, temporal coupling).
+> These read your `git log` — add `--no-git` to skip, or `--git-commits <n>` to
+> widen/narrow the history window (default 800).
+
 ---
 
 ## 8. Accuracy & live updates (good to know)
@@ -184,6 +213,10 @@ Watch and LSP are **on by default**.
 | `--export <file.html>` | write a standalone interactive HTML and exit |
 | `--check` | CI mode: report + exit non-zero past thresholds |
 | `--max-high <n>` / `--max-total <n>` | `--check` thresholds |
+| `--baseline <file>` | with `--check`, gate only on findings *new* vs this baseline graph |
+| `--diff <file>` | write the added/removed delta vs `--baseline` and exit |
+| `--no-git` | skip git-history mining (hotspots + temporal coupling) |
+| `--git-commits <n>` | git-log history window (default 800) |
 | `--app-url <url>` | base URL of the real app on Flutter Web (Live tab) |
 | `--catalog <url>` / `--catalog-build <dir>` | component-catalog URL / auto-rebuilt catalog dir |
 
@@ -207,6 +240,8 @@ offline. Architecture details and contributor notes live in
 - Very dynamic route construction may not resolve a navigation target.
 - Without the Dart LSP, `uses`/`api` edges fall back to heuristics and can
   over-match (the LSP pass fixes this).
+- Hotspots & temporal coupling need a git repo with history; they're skipped
+  on a shallow clone or non-git project (everything else still works).
 
 ## Tests
 

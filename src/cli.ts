@@ -20,7 +20,11 @@ import { analyzeWithLsp } from './lsp/analyze.js';
 import { buildGraph } from './graph-builder.js';
 import { startServer, type RunningServer } from './server.js';
 import { buildStandaloneHtml } from './export.js';
-import type { GraphData } from './types.js';
+import { collectGit } from './git.js';
+import { computeCoverage } from './coverage.js';
+import { loadPolicy } from './policy.js';
+import { diffGraphs } from './diff.js';
+import type { GitInsightData, GraphData, GraphDiff, InsightInputs, ScanResult, Severity } from './types.js';
 
 interface CliArgs {
   projectPath?: string;
@@ -34,6 +38,14 @@ interface CliArgs {
   checkMaxHigh: number;
   /** Max allowed total findings in --check mode; Infinity = unlimited. */
   checkMaxTotal: number;
+  /** Mine git history for churn/hotspots + temporal coupling. Default true. */
+  git: boolean;
+  /** Override the git-log commit window (collectGit default 800). */
+  gitCommits?: number;
+  /** Baseline graph.json to diff against (gates --check on NEW findings). */
+  baseline?: string;
+  /** Write a GraphDiff to this file and exit (requires --baseline). */
+  diff?: string;
   catalog?: string;
   catalogBuild?: string;
   appUrl?: string;
@@ -50,7 +62,7 @@ function parseArgs(argv: string[]): CliArgs {
   // Watch and LSP are on by default; use --no-watch / --no-lsp to opt out.
   const args: CliArgs = {
     port: 4567, open: true, watch: true, lsp: true,
-    check: false, checkMaxHigh: 0, checkMaxTotal: Infinity,
+    check: false, checkMaxHigh: 0, checkMaxTotal: Infinity, git: true,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -59,6 +71,14 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === '--no-watch') args.watch = false;
     else if (a === '--lsp') args.lsp = true;
     else if (a === '--no-lsp') args.lsp = false;
+    else if (a === '--git') args.git = true;
+    else if (a === '--no-git') args.git = false;
+    else if (a === '--git-commits') {
+      const n = Math.trunc(Number(argv[++i]));
+      if (Number.isFinite(n) && n > 0) args.gitCommits = n;
+    }
+    else if (a === '--baseline') args.baseline = argv[++i];
+    else if (a === '--diff') args.diff = argv[++i];
     else if (a === '--port') args.port = Number(argv[++i]) || args.port;
     else if (a === '--json') args.json = argv[++i];
     else if (a === '--export') args.export = argv[++i];
@@ -88,11 +108,68 @@ function resolveWebDir(): string {
 }
 
 /**
+ * Gather the optional history/config inputs that power the extended insight
+ * categories: git churn + co-change (hotspots / temporal coupling), test
+ * coverage (untested pages), and the .pagemapper.json policy. Each is
+ * best-effort — a failure or missing source just disables that category.
+ * `useGit` is gated separately because git mining is the slow part (skipped on
+ * the fast interactive graph).
+ */
+/** Cache the git mining result briefly: in watch mode every .dart save triggers
+ *  a refine, but a file save never changes git history — re-running `git log` each
+ *  time is pure waste. A short TTL keeps churn reasonably fresh after a commit. */
+let gitCache: { at: number; root: string; commits?: number; data: GitInsightData } | null = null;
+const GIT_TTL_MS = 60_000;
+
+async function gatherInputs(
+  projectRoot: string,
+  scan: ScanResult,
+  useGit: boolean,
+  gitCommits?: number,
+): Promise<InsightInputs> {
+  const inputs: InsightInputs = {};
+  if (useGit) {
+    try {
+      const now = Date.now();
+      if (
+        gitCache &&
+        gitCache.root === projectRoot &&
+        gitCache.commits === gitCommits &&
+        now - gitCache.at < GIT_TTL_MS
+      ) {
+        inputs.git = gitCache.data;
+      } else {
+        const git = await collectGit(projectRoot, scan.files, gitCommits ? { commits: gitCommits } : {});
+        if (git) {
+          inputs.git = git;
+          gitCache = { at: now, root: projectRoot, commits: gitCommits, data: git };
+        }
+      }
+    } catch { /* no git history — skip churn/co-change */ }
+  }
+  try {
+    const cov = await computeCoverage(scan);
+    if (cov.coveredRel.length) inputs.coveredRel = cov.coveredRel;
+  } catch { /* coverage best-effort */ }
+  try {
+    const pol = await loadPolicy(projectRoot);
+    if (pol) inputs.policy = pol;
+  } catch { /* policy best-effort */ }
+  return inputs;
+}
+
+/**
  * Run the full scan -> parse -> build pipeline. When `useLsp` is set we try the
  * Dart analysis server for accurate symbol/reference data, falling back to the
- * heuristic parser if Dart isn't available or the server fails.
+ * heuristic parser if Dart isn't available or the server fails. `useGit` enables
+ * git-history mining (off for the fast interactive path).
  */
-async function analyze(projectRoot: string, useLsp: boolean): Promise<GraphData> {
+async function analyze(
+  projectRoot: string,
+  useLsp: boolean,
+  useGit = false,
+  gitCommits?: number,
+): Promise<GraphData> {
   const scan = await scanProject(projectRoot);
   let parse = null;
   if (useLsp) {
@@ -103,7 +180,8 @@ async function analyze(projectRoot: string, useLsp: boolean): Promise<GraphData>
     }
   }
   if (!parse) parse = await parseProject(scan);
-  return buildGraph(scan, parse);
+  const inputs = await gatherInputs(projectRoot, scan, useGit, gitCommits);
+  return buildGraph(scan, parse, inputs);
 }
 
 function printSummary(graph: GraphData): void {
@@ -159,6 +237,69 @@ function printCheckResults(graph: GraphData, maxHigh: number, maxTotal: number):
 
   console.log('');
   console.log(`  thresholds: --max-high ${maxHigh}, --max-total ${maxTotalLabel}`);
+  if (reasons.length) {
+    for (const r of reasons) console.log(`  ✗ ${r}`);
+    console.log('');
+    console.log('FAIL');
+    return false;
+  }
+  console.log('');
+  console.log('PASS');
+  return true;
+}
+
+/** Load a previously written graph.json baseline. Exits the process on error. */
+async function loadBaseline(file: string): Promise<GraphData> {
+  try {
+    const raw = await fs.readFile(path.resolve(file), 'utf8');
+    return JSON.parse(raw) as GraphData;
+  } catch (err) {
+    console.error(`Error: could not read baseline ${file}: ${(err as Error).message}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * --check + --baseline (CI regression gate): print the insight delta vs the
+ * baseline and gate ONLY on newly-added findings, so a debt-heavy repo can adopt
+ * the gate without first paying down all existing findings — only new debt fails.
+ */
+function printCheckDiffResults(diff: GraphDiff, maxHigh: number, maxTotal: number): boolean {
+  const sev = (s: Severity): number => (s === 'high' ? 1 : 0);
+  const addedHigh = diff.insights.added.reduce((a, f) => a + sev(f.severity), 0);
+  const addedTotal = diff.insights.added.length;
+  const removedTotal = diff.insights.removed.length;
+
+  console.log('');
+  console.log('PageMapper check (vs baseline)');
+  const cats = Object.keys(diff.insights.summary).filter((k) => k !== 'total').sort();
+  if (!cats.length) {
+    console.log('  (no insight changes)');
+  }
+  for (const k of cats) {
+    const s = diff.insights.summary[k];
+    console.log(`  ${k}: +${s.added} new, -${s.removed} fixed`);
+  }
+  console.log('  ----');
+  console.log(`  new findings: ${addedTotal} (${addedHigh} high) · fixed: ${removedTotal}`);
+  if (addedTotal) {
+    console.log('');
+    console.log('  New findings:');
+    for (const f of diff.insights.added.slice(0, 20)) {
+      console.log(`    [${f.severity}] ${f.category}: ${f.title}`);
+    }
+    if (diff.insights.added.length > 20) console.log(`    …(+${diff.insights.added.length - 20} more)`);
+  }
+
+  const maxTotalLabel = Number.isFinite(maxTotal) ? String(maxTotal) : 'unlimited';
+  const reasons: string[] = [];
+  if (addedHigh > maxHigh) reasons.push(`new high-severity findings ${addedHigh} exceed --max-high ${maxHigh}`);
+  if (Number.isFinite(maxTotal) && addedTotal > maxTotal) {
+    reasons.push(`new total findings ${addedTotal} exceed --max-total ${maxTotal}`);
+  }
+
+  console.log('');
+  console.log(`  thresholds (applied to NEW findings): --max-high ${maxHigh}, --max-total ${maxTotalLabel}`);
   if (reasons.length) {
     for (const r of reasons) console.log(`  ✗ ${r}`);
     console.log('');
@@ -292,7 +433,9 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (!args.projectPath) {
     console.error(
-      'Usage: pagemapper <project-path> [--port N] [--no-open] [--no-watch] [--no-lsp] [--json <out>] [--export <out.html>] [--check] [--max-high N] [--max-total N]',
+      'Usage: pagemapper <project-path> [--port N] [--no-open] [--no-watch] [--no-lsp] [--no-git]\n' +
+      '         [--json <out>] [--export <out.html>] [--check] [--max-high N] [--max-total N]\n' +
+      '         [--baseline <graph.json>] [--diff <out.json>] [--git-commits N]',
     );
     process.exit(1);
   }
@@ -313,15 +456,43 @@ async function main(): Promise<void> {
   // findings exceed --max-high / --max-total. No server, watch, or browser.
   if (args.check) {
     if (args.lsp) console.error('Analyzing with Dart LSP (use --no-lsp to skip) ...');
-    const graph = await analyze(projectRoot, args.lsp);
-    const passed = printCheckResults(graph, args.checkMaxHigh, args.checkMaxTotal);
+    const graph = await analyze(projectRoot, args.lsp, args.git, args.gitCommits);
+    let passed: boolean;
+    if (args.baseline) {
+      const baseline = await loadBaseline(args.baseline);
+      passed = printCheckDiffResults(diffGraphs(baseline, graph), args.checkMaxHigh, args.checkMaxTotal);
+    } else {
+      passed = printCheckResults(graph, args.checkMaxHigh, args.checkMaxTotal);
+    }
     process.exit(passed ? 0 : 1);
+  }
+
+  // --diff is one-shot: analyze, compare to the baseline, write the GraphDiff.
+  if (args.diff) {
+    if (!args.baseline) {
+      console.error('Error: --diff requires --baseline <graph.json>');
+      process.exit(1);
+    }
+    if (args.lsp) console.error('Analyzing with Dart LSP (use --no-lsp to skip) ...');
+    const graph = await analyze(projectRoot, args.lsp, args.git, args.gitCommits);
+    const baseline = await loadBaseline(args.baseline);
+    const diff = diffGraphs(baseline, graph);
+    const out = path.resolve(args.diff);
+    await fs.writeFile(out, JSON.stringify(diff, null, 2), 'utf8');
+    const a = diff.insights.added.length;
+    const r = diff.insights.removed.length;
+    console.log(
+      `\nDiff vs baseline · nodes +${diff.nodes.added.length}/-${diff.nodes.removed.length}, ` +
+      `edges +${diff.edges.added.length}/-${diff.edges.removed.length}, findings +${a}/-${r}`,
+    );
+    console.log(`Wrote diff JSON -> ${out}`);
+    return;
   }
 
   // --json / --export are one-shot: do the accurate (LSP) analysis up front.
   if (args.json || args.export) {
     if (args.lsp) console.error('Analyzing with Dart LSP (use --no-lsp to skip) ...');
-    const graph = await analyze(projectRoot, args.lsp);
+    const graph = await analyze(projectRoot, args.lsp, args.git, args.gitCommits);
     printSummary(graph);
     if (args.json) {
       const out = path.resolve(args.json);
@@ -356,7 +527,8 @@ async function main(): Promise<void> {
       const scan = await scanProject(projectRoot);
       const parse = await analyzeWithLsp(scan);
       if (!parse) return { ok: false, reason: 'unavailable' };
-      const accurate = buildGraph(scan, parse);
+      const inputs = await gatherInputs(projectRoot, scan, args.git, args.gitCommits);
+      const accurate = buildGraph(scan, parse, inputs);
       server.update(accurate);
       const uses = accurate.stats.edge_uses ?? 0;
       console.error(`  ✓ LSP refine applied · ${uses} uses, ${accurate.stats.edge_api ?? 0} api edges`);
@@ -379,7 +551,21 @@ async function main(): Promise<void> {
 
   if (args.lsp) {
     console.error('Refining with Dart LSP in the background (use --no-lsp to skip) ...');
-    refine().catch(() => { /* keep the heuristic graph on failure */ });
+    refine()
+      .then((r) => {
+        if (r && !r.ok) console.error(`  (LSP unavailable: ${r.reason ?? 'unknown'} — keeping the heuristic graph)`);
+      })
+      .catch(() => { /* keep the heuristic graph on failure */ });
+  } else if (args.git) {
+    // No LSP refine to carry git data through — mine git once in the background
+    // and push the enriched graph (churn/hotspots/co-change) over SSE.
+    console.error('Mining git history in the background (use --no-git to skip) ...');
+    (async () => {
+      const enriched = await analyze(projectRoot, false, true, args.gitCommits);
+      server.update(enriched);
+      const h = enriched.insights?.summary['hotspot'] ?? 0;
+      console.error(`  ✓ git history applied · churn ready, ${h} hotspot${h === 1 ? '' : 's'}`);
+    })().catch(() => { /* keep the heuristic graph */ });
   }
 
   if (args.watch) {
