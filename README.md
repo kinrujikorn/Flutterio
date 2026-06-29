@@ -138,7 +138,29 @@ it's not set up, the Source and Preview UI tabs still work everywhere.
 
 ---
 
-## 6. Share a map
+## 6. Browse every API — with a mock request & response
+
+Click the **`</>` button** in the top bar to open the **API Catalog**: every HTTP
+call the app makes, in one searchable list — no more digging through datasource
+code to figure out what an endpoint sends and returns.
+
+For each endpoint you get:
+- the **method + path** (`GET activity/v1/Activity/ActivityReport`, with `{id}`
+  params), the owning service, and the feature;
+- a **mock request** and **mock response** as ready-to-read JSON — generated
+  deterministically from the Dart request/response models (freezed `@JsonKey`
+  fields, nested models, lists, enums all resolved). It's a *shape*, not real
+  data — no network, no AI — so you understand the contract at a glance.
+
+Filter by method (GET/POST/PUT/PATCH/DELETE) or search by path/service. On the
+venio app it surfaces ~390 endpoints with ~290 typed responses.
+
+> Like everything else, the catalog rides along in `graph.json`, so `--json` and
+> the standalone `--export` HTML include it too.
+
+---
+
+## 7. Share a map
 
 - **PNG** — the toolbar button downloads the current view as an image.
 - **Standalone HTML** — one self-contained file (graph + UI + fonts all inlined)
@@ -153,7 +175,7 @@ it's not set up, the Source and Preview UI tabs still work everywhere.
 
 ---
 
-## 7. Use it in CI (catch regressions)
+## 8. Use it in CI (catch regressions)
 
 `--check` runs the analysis once and **fails the build** if there are too many
 problems — great as a pull-request gate:
@@ -186,7 +208,7 @@ node dist/cli.js <project> --no-open --check --baseline pagemapper-baseline.json
 
 ---
 
-## 8. Accuracy & live updates (good to know)
+## 9. Accuracy & live updates (good to know)
 
 - **Dart LSP** — if the Dart SDK is on your PATH, PageMapper uses the real Dart
   analysis server for precise results (correct classes, real `uses`/`api` edges

@@ -24,6 +24,7 @@ import { collectGit } from './git.js';
 import { computeCoverage } from './coverage.js';
 import { loadPolicy } from './policy.js';
 import { diffGraphs } from './diff.js';
+import { buildApiCatalog } from './api-catalog.js';
 import type { GitInsightData, GraphData, GraphDiff, InsightInputs, ScanResult, Severity } from './types.js';
 
 interface CliArgs {
@@ -169,6 +170,7 @@ async function analyze(
   useLsp: boolean,
   useGit = false,
   gitCommits?: number,
+  useCatalog = false,
 ): Promise<GraphData> {
   const scan = await scanProject(projectRoot);
   let parse = null;
@@ -181,7 +183,13 @@ async function analyze(
   }
   if (!parse) parse = await parseProject(scan);
   const inputs = await gatherInputs(projectRoot, scan, useGit, gitCommits);
-  return buildGraph(scan, parse, inputs);
+  const graph = buildGraph(scan, parse, inputs);
+  // The API catalog (deterministic mock req/res) is "heavy" — computed on the
+  // one-shot/refine paths, not the fast interactive first paint.
+  if (useCatalog) {
+    try { graph.apiCatalog = await buildApiCatalog(scan); } catch { /* skip catalog */ }
+  }
+  return graph;
 }
 
 function printSummary(graph: GraphData): void {
@@ -456,7 +464,7 @@ async function main(): Promise<void> {
   // findings exceed --max-high / --max-total. No server, watch, or browser.
   if (args.check) {
     if (args.lsp) console.error('Analyzing with Dart LSP (use --no-lsp to skip) ...');
-    const graph = await analyze(projectRoot, args.lsp, args.git, args.gitCommits);
+    const graph = await analyze(projectRoot, args.lsp, args.git, args.gitCommits, true);
     let passed: boolean;
     if (args.baseline) {
       const baseline = await loadBaseline(args.baseline);
@@ -474,7 +482,7 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     if (args.lsp) console.error('Analyzing with Dart LSP (use --no-lsp to skip) ...');
-    const graph = await analyze(projectRoot, args.lsp, args.git, args.gitCommits);
+    const graph = await analyze(projectRoot, args.lsp, args.git, args.gitCommits, true);
     const baseline = await loadBaseline(args.baseline);
     const diff = diffGraphs(baseline, graph);
     const out = path.resolve(args.diff);
@@ -492,7 +500,7 @@ async function main(): Promise<void> {
   // --json / --export are one-shot: do the accurate (LSP) analysis up front.
   if (args.json || args.export) {
     if (args.lsp) console.error('Analyzing with Dart LSP (use --no-lsp to skip) ...');
-    const graph = await analyze(projectRoot, args.lsp, args.git, args.gitCommits);
+    const graph = await analyze(projectRoot, args.lsp, args.git, args.gitCommits, true);
     printSummary(graph);
     if (args.json) {
       const out = path.resolve(args.json);
@@ -529,6 +537,7 @@ async function main(): Promise<void> {
       if (!parse) return { ok: false, reason: 'unavailable' };
       const inputs = await gatherInputs(projectRoot, scan, args.git, args.gitCommits);
       const accurate = buildGraph(scan, parse, inputs);
+      try { accurate.apiCatalog = await buildApiCatalog(scan); } catch { /* skip catalog */ }
       server.update(accurate);
       const uses = accurate.stats.edge_uses ?? 0;
       console.error(`  ✓ LSP refine applied · ${uses} uses, ${accurate.stats.edge_api ?? 0} api edges`);
@@ -561,7 +570,7 @@ async function main(): Promise<void> {
     // and push the enriched graph (churn/hotspots/co-change) over SSE.
     console.error('Mining git history in the background (use --no-git to skip) ...');
     (async () => {
-      const enriched = await analyze(projectRoot, false, true, args.gitCommits);
+      const enriched = await analyze(projectRoot, false, true, args.gitCommits, true);
       server.update(enriched);
       const h = enriched.insights?.summary['hotspot'] ?? 0;
       console.error(`  ✓ git history applied · churn ready, ${h} hotspot${h === 1 ? '' : 's'}`);

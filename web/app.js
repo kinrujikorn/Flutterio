@@ -83,7 +83,10 @@
     appUrl: null,      // base URL of the real app on Flutter Web (route deep-link)
     codePath: null,    // file currently open in the code modal
     codeRoute: null,   // routePath of the node open in the code modal (if a page)
-    focusInsight: null // Set of node ids force-kept on the graph for an insight
+    focusInsight: null, // Set of node ids force-kept on the graph for an insight
+    apiFilter: "",     // text filter for the API Catalog
+    apiMethod: "",     // active HTTP-method filter ("" = all)
+    apiSelected: null  // id of the selected endpoint in the API Catalog
   };
 
   // ---- Shareable URL state ----------------------------------------------
@@ -1377,6 +1380,7 @@
       renderFilters();
       renderInsights();
       renderCoupling();
+      refreshApiButton(); // catalog arrives after the background refine/enrich
       // Git churn may appear after a background LSP refine — reveal the toggle.
       var churnRowLR = document.getElementById("churn-row");
       if (churnRowLR) churnRowLR.hidden = !hasChurn();
@@ -2394,6 +2398,143 @@
   }
 
   // ---- Init --------------------------------------------------------------
+  // ---- API Catalog -------------------------------------------------------
+  var API_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+
+  function hasApiCatalog() {
+    return !!(state.data && state.data.apiCatalog && state.data.apiCatalog.endpoints && state.data.apiCatalog.endpoints.length);
+  }
+
+  // Show/hide the header button + its count when a catalog is (un)available.
+  function refreshApiButton() {
+    var btn = document.getElementById("api-toggle");
+    if (!btn) return;
+    btn.hidden = !hasApiCatalog();
+    if (!btn.hidden) {
+      var cnt = document.getElementById("api-toggle-count");
+      if (cnt) cnt.textContent = state.data.apiCatalog.endpoints.length;
+    }
+  }
+
+  function setupApiCatalog() {
+    var modal = document.getElementById("api-modal");
+    var btn = document.getElementById("api-toggle");
+    if (!modal || !btn) return;
+    btn.addEventListener("click", openApiCatalog);
+    var close = document.getElementById("api-close");
+    if (close) close.addEventListener("click", function () { modal.hidden = true; });
+    modal.addEventListener("click", function (e) { if (e.target === modal) modal.hidden = true; });
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape" && !modal.hidden) modal.hidden = true; });
+    var search = document.getElementById("api-search");
+    if (search) search.addEventListener("input", function () { state.apiFilter = search.value.trim().toLowerCase(); renderApiList(); });
+  }
+
+  function openApiCatalog() {
+    if (!hasApiCatalog()) return;
+    var modal = document.getElementById("api-modal");
+    document.getElementById("api-count").textContent = state.data.apiCatalog.endpoints.length + " endpoints";
+    renderApiMethods();
+    renderApiList();
+    modal.hidden = false;
+    var s = document.getElementById("api-search");
+    if (s) setTimeout(function () { s.focus(); }, 30);
+  }
+
+  function renderApiMethods() {
+    var wrap = document.getElementById("api-methods");
+    if (!wrap) return;
+    var stats = state.data.apiCatalog.stats || {};
+    var chips = ['<button class="api-chip' + (!state.apiMethod ? " active" : "") + '" data-m="">All <b>' + (stats.total || 0) + "</b></button>"];
+    API_METHODS.forEach(function (m) {
+      if (!stats[m]) return;
+      chips.push('<button class="api-chip m-' + m + (state.apiMethod === m ? " active" : "") + '" data-m="' + m + '">' + m + " <b>" + stats[m] + "</b></button>");
+    });
+    wrap.innerHTML = chips.join("");
+    Array.prototype.forEach.call(wrap.querySelectorAll(".api-chip"), function (el) {
+      el.addEventListener("click", function () { state.apiMethod = el.getAttribute("data-m"); renderApiMethods(); renderApiList(); });
+    });
+  }
+
+  function apiMatches(ep) {
+    if (state.apiMethod && ep.method !== state.apiMethod) return false;
+    var q = state.apiFilter;
+    if (!q) return true;
+    return (ep.path && ep.path.toLowerCase().indexOf(q) !== -1) ||
+           (ep.method && ep.method.toLowerCase().indexOf(q) !== -1) ||
+           (ep.service && ep.service.toLowerCase().indexOf(q) !== -1) ||
+           (ep.responseType && ep.responseType.toLowerCase().indexOf(q) !== -1) ||
+           (ep.feature && ep.feature.toLowerCase().indexOf(q) !== -1);
+  }
+
+  function renderApiList() {
+    var list = document.getElementById("api-list");
+    if (!list) return;
+    var eps = state.data.apiCatalog.endpoints.filter(apiMatches);
+    if (!eps.length) { list.innerHTML = '<div class="api-empty">No endpoints match.</div>'; return; }
+    list.innerHTML = eps.map(function (ep) {
+      return '<button class="api-row' + (state.apiSelected === ep.id ? " active" : "") + '" data-id="' + esc(ep.id) + '">' +
+        '<span class="api-m m-' + esc(ep.method) + '">' + esc(ep.method) + "</span>" +
+        '<span class="api-path">' + esc(ep.path) + "</span>" +
+        (ep.service ? '<span class="api-svc">' + esc(ep.service) + "</span>" : "") +
+        "</button>";
+    }).join("");
+    Array.prototype.forEach.call(list.querySelectorAll(".api-row"), function (el) {
+      el.addEventListener("click", function () { selectApiEndpoint(el.getAttribute("data-id")); });
+    });
+  }
+
+  function selectApiEndpoint(id) {
+    state.apiSelected = id;
+    var eps = state.data.apiCatalog.endpoints, ep = null;
+    for (var i = 0; i < eps.length; i++) { if (eps[i].id === id) { ep = eps[i]; break; } }
+    Array.prototype.forEach.call(document.querySelectorAll(".api-row"), function (el) {
+      el.classList.toggle("active", el.getAttribute("data-id") === id);
+    });
+    var d = document.getElementById("api-detail");
+    if (!d || !ep) { if (d) d.innerHTML = ""; return; }
+
+    function block(title, val) {
+      if (val === undefined || val === null) return "";
+      return '<div class="api-block"><div class="api-block-h">' + title + '</div><pre class="api-json">' + jsonHtml(val) + "</pre></div>";
+    }
+    var meta = [];
+    if (ep.feature) meta.push('<span class="api-tag">' + esc(ep.feature) + "</span>");
+    if (ep.partial) meta.push('<span class="api-tag warn" title="Some types could not be fully resolved from source">partial</span>');
+
+    d.innerHTML =
+      '<div class="api-d-head"><span class="api-m m-' + esc(ep.method) + '">' + esc(ep.method) + "</span>" +
+        '<span class="api-d-path">' + esc(ep.path) + "</span></div>" +
+      (meta.length ? '<div class="api-d-meta">' + meta.join("") + "</div>" : "") +
+      (state.canSource && ep.fromFileRel
+        ? '<button class="code-btn api-src" data-f="' + esc(ep.fromFileRel) + '"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg><span>' + esc(ep.fromFileRel) + "</span></button>"
+        : '<div class="api-file">' + esc(ep.fromFileRel || "") + "</div>") +
+      block("Query parameters", ep.mockQuery) +
+      block("Request" + (ep.requestType ? " · " + esc(ep.requestType) : ""), ep.mockRequest) +
+      block("Response" + (ep.responseType ? " · " + esc(ep.responseType) + (ep.responseIsList ? "[]" : "") : ""), ep.mockResponse);
+
+    var src = d.querySelector(".api-src");
+    if (src) src.addEventListener("click", function () {
+      document.getElementById("api-modal").hidden = true;
+      state.codeRoute = null;
+      openCode(src.getAttribute("data-f"));
+    });
+  }
+
+  // Pretty-print JSON with lightweight syntax highlighting. Escapes &<> (kept in
+  // <pre> text), leaves " for the token regex, then wraps keys/strings/etc.
+  function jsonHtml(val) {
+    var s = JSON.stringify(val, null, 2);
+    if (s === undefined) return "";
+    s = s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return s.replace(/("(?:\\.|[^"\\])*"(?:\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?)/g, function (m) {
+      var cls = "j-num";
+      if (m.charAt(0) === '"') cls = /:\s*$/.test(m) ? "j-key" : "j-str";
+      else if (m === "true" || m === "false") cls = "j-bool";
+      else if (m === "null") cls = "j-null";
+      return '<span class="' + cls + '">' + m + "</span>";
+    });
+  }
+
   function init() {
     var loader = document.createElement("div");
     loader.id = "loader"; loader.innerHTML = '<div class="spinner"></div>';
@@ -2408,6 +2549,7 @@
       renderFilters();
       renderInsights();
       renderCoupling();
+      refreshApiButton();
       document.getElementById("view-desc").textContent = VIEWS[state.view].desc;
 
       // Reflect restored state in the UI controls (view tabs + toggles), which
@@ -2477,6 +2619,7 @@
       setupSearch();
       setupExport();
       setupSource();
+      setupApiCatalog();
       setupMinimap();
       setupHelp();
       window.addEventListener("resize", debounce(fitDeviceFrame, 150));

@@ -215,6 +215,8 @@ export interface GraphData {
   insights?: InsightsReport;
   /** Per-package coupling/instability metrics. */
   coupling?: PackageCoupling[];
+  /** Browsable list of API calls with deterministic mock request/response. */
+  apiCatalog?: ApiCatalog;
 }
 
 // ---- Git history overlay (churn + temporal coupling) ----------------------
@@ -314,4 +316,47 @@ export interface GraphDiff {
     /** Per-category {added, removed}, plus a `total` key. */
     summary: Record<string, { added: number; removed: number }>;
   };
+}
+
+// ---- API Catalog (browsable endpoint list + deterministic mocks) ----------
+
+/** One HTTP API call discovered in the project, with a synthesized mock. The
+ *  mocks are generated deterministically from the Dart request/response model
+ *  classes — no real data, no network, no LLM — so a reader understands the API
+ *  shape without tracing the code. */
+export interface ApiEndpoint {
+  /** Stable id, e.g. "GET /api/v1/users/:id". */
+  id: string;
+  /** HTTP method uppercased (GET/POST/PUT/DELETE/PATCH), or "CALL" if unknown. */
+  method: string;
+  /** Endpoint path as written; `${expr}` interpolations are normalized to :param. */
+  path: string;
+  /** Call-site file (project-relative). */
+  fromFileRel: string;
+  /** Owning service/datasource/repository class, if resolvable. */
+  service?: string;
+  /** Feature folder, if any. */
+  feature?: string;
+  /** Dart type name of the request body, if derivable. */
+  requestType?: string;
+  /** Dart type name of the response payload, if derivable. */
+  responseType?: string;
+  /** Whether the response is a list of `responseType`. */
+  responseIsList?: boolean;
+  /** Synthesized mock request body (JSON-able value), or null. */
+  mockRequest?: unknown;
+  /** Synthesized mock query parameters (for GET/DELETE), if any. */
+  mockQuery?: unknown;
+  /** Synthesized mock response (JSON-able value), or null. */
+  mockResponse?: unknown;
+  /** True when a type couldn't be resolved and the mock is a placeholder. */
+  partial?: boolean;
+}
+
+/** All discovered endpoints + summary counts, attached to GraphData. */
+export interface ApiCatalog {
+  generatedAt: string;
+  endpoints: ApiEndpoint[];
+  /** `total` plus per-method counts (e.g. GET, POST). */
+  stats: Record<string, number>;
 }

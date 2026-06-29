@@ -33,6 +33,10 @@
                  role="combobox" aria-expanded="false" aria-controls="search-results" aria-autocomplete="list" aria-label="Search nodes" />
           <div id="search-results" role="listbox" aria-label="Search results"></div>
         </div>
+        <button id="api-toggle" class="icon-btn api-toggle" title="API Catalog — every API call with mock request/response" aria-label="API Catalog" hidden>
+          <svg viewBox="0 0 24 24"><polyline points="8 7 4 12 8 17"/><polyline points="16 7 20 12 16 17"/><line x1="13.5" y1="6" x2="10.5" y2="18"/></svg>
+          <span class="api-toggle-count" id="api-toggle-count"></span>
+        </button>
         <button id="help-toggle" class="icon-btn" title="Help & legend" aria-label="Help and legend">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.2a2.4 2.4 0 1 1 3.6 2.2c-.8.5-1.2 1-1.2 1.9"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
         </button>
@@ -217,6 +221,28 @@
         <div class="code-body" id="code-body"></div>
         <div class="code-preview" id="code-preview" hidden></div>
         <div class="code-preview" id="code-live" hidden></div>
+      </div>
+    </div>
+
+    <!-- ===== API Catalog ===== -->
+    <div id="api-modal" hidden>
+      <div class="code-card api-card">
+        <div class="code-head api-head">
+          <svg class="code-file-icon" viewBox="0 0 24 24"><polyline points="8 7 4 12 8 17"/><polyline points="16 7 20 12 16 17"/><line x1="13.5" y1="6" x2="10.5" y2="18"/></svg>
+          <span class="code-path">API Catalog</span>
+          <span class="api-count" id="api-count"></span>
+          <div class="api-search-wrap">
+            <input id="api-search" type="text" placeholder="Search path · method · service…" autocomplete="off" spellcheck="false" aria-label="Search APIs" />
+          </div>
+          <button class="code-close" id="api-close" title="Close (Esc)">&times;</button>
+        </div>
+        <div class="api-methods" id="api-methods"><!-- method filter chips, by JS --></div>
+        <div class="api-main">
+          <div class="api-list" id="api-list" role="listbox" aria-label="API endpoints"><!-- rows by JS --></div>
+          <div class="api-detail" id="api-detail">
+            <div class="api-empty">Select an endpoint to see its mock request &amp; response.</div>
+          </div>
+        </div>
       </div>
     </div>
 
